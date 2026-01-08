@@ -1,0 +1,72 @@
+experiment: exp8_conditioning_moe_inr_high_low_frequency_xyz_to_e
+exp_id: conditioning-moeinr-highlow-centroids-e
+experiment_root: experiments
+data:
+  dataset_name: centroids
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/centroids/train/coords_xyzt.npy
+  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  normalize: true
+model:
+  name: conditioning_moe_inr_high_low_frequency
+  in_features: 4
+  out_features: 24
+  num_experts: 7
+  num_low_freq_experts: 3
+  encoder_feature_dim: 256
+  encoder_num_res_blocks: 10
+  encoder_first_omega_0: 30.0
+  encoder_hidden_omega_0: 30.0
+  policy_hidden_dim: 128
+  policy_num_layers: 3
+  policy_first_omega_0: 30.0
+  policy_hidden_omega_0: 30.0
+  indicator_grid_size: 16
+  indicator_kernel_sizes: [3, 7, 11]
+  indicator_features: ["hf", "variance"]
+  indicator_dim: 2
+  indicator_basis_count: 8
+  time_feature_dim: 16
+  time_mlp_hidden_dim: 32
+  indicator_time_mlp_hidden_dim: 32
+  indicator_time_softmax: true
+  indicator_time_weight_scale: 1.0
+  indicator_reg_smooth: 1.0e-3
+  indicator_reg_prior: 1.0e-3
+  indicator_reg_amplitude: 1.0e-3
+  indicator_reg_amplitude_min: 0.0
+  indicator_reg_amplitude_max: 1.0
+  indicator_reg_smooth_kernel: 3
+  hard_routing_at_eval: false
+  straight_through_routing: false
+  routing_top_k: 1
+  routing_load_balance_weight: 1.0e-2
+  routing_group_split_weight: 1.0e-2
+  routing_group_split_ratio: 0.5714
+  routing_hf_center_quantile: 0.7
+  routing_hf_temperature: 0.5
+  routing_hf_min: 0.2
+  routing_entropy_weight: 1.0e-3
+  high_expert_hidden_dim: 320
+  high_expert_num_layers: 4
+  high_expert_first_omega_0: 60.0
+  high_expert_hidden_omega_0: 60.0
+  low_expert_hidden_dim: 192
+  low_expert_num_layers: 3
+  low_expert_first_omega_0: 15.0
+  low_expert_hidden_omega_0: 15.0
+  low_freq_consistency_weight: 1.0e-3
+  low_freq_consistency_std: 1.0e-3
+  low_freq_consistency_samples: 2048
+  low_freq_consistency_spatial_only: true
+training:
+  epochs: 60
+  batch_size: 65536
+  pred_batch_size: 65536
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42

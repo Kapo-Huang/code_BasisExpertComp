@@ -1,0 +1,49 @@
+experiment: exp9_1_moe_inr_experts_pool_ocean_xyzt
+exp_id: moe-inr-experts-pool-ocean-multiview
+experiment_root: experiments
+data:
+  dataset_name: ocean
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/ocean/train/data_XYZT_sub.npy
+  attr_paths:
+    data_fort63: ./data/raw/ocean/train/data_fort63_sub.npy
+    data_fort64: ./data/raw/ocean/train/data_fort64_sub.npy
+    data_fort73: ./data/raw/ocean/train/data_fort73_sub.npy
+    data_V_time: ./data/raw/ocean/train/data_V_time_sub.npy
+    data_Speed_time: ./data/raw/ocean/train/data_Speed_time_sub.npy
+  normalize: true
+model:
+  name: moe_inr_experts_pool
+  in_features: 4
+  num_experts: 7
+  expert_feature_dim: 128
+  top_k: 2
+  view_embed_dim: 16
+  expert_use_positional_encoding: true
+  expert_num_frequencies: 6
+  expert_hidden_dim: 128
+  expert_num_layers: 3
+  gate_hidden_dim: 128
+  gate_num_layers: 3
+  decoder_hidden_dim: 128
+  decoder_num_layers: 3
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  gate_first_omega_0: 30.0
+  gate_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+training:
+  epochs: 60
+  batch_size: 8192
+  pred_batch_size: 8192
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 1.0e-2
+  gam_div: 1.0e-3

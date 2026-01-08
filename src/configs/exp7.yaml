@@ -1,0 +1,54 @@
+experiment: exp7_conditioning_moe_inr_xyz_to_e
+exp_id: conditioning-moeinr-centroids-e
+experiment_root: experiments
+data:
+  dataset_name: centroids
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/centroids/train/coords_xyzt.npy
+  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  normalize: true
+model:
+  name: conditioning_moe_inr
+  in_features: 4
+  out_features: 24
+  num_experts: 7
+  encoder_feature_dim: 256
+  encoder_num_res_blocks: 10
+  encoder_first_omega_0: 30.0
+  encoder_hidden_omega_0: 30.0
+  policy_hidden_dim: 128
+  policy_num_layers: 3
+  policy_first_omega_0: 30.0
+  policy_hidden_omega_0: 30.0
+  expert_hidden_dim: 256
+  expert_num_layers: 3
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  indicator_grid_size: 16
+  indicator_kernel_sizes: [3, 7, 11]
+  indicator_features: ["hf", "variance"]
+  indicator_dim: 2
+  time_feature_dim: 16
+  time_mlp_hidden_dim: 32
+  indicator_reg_smooth: 1.0e-3
+  indicator_reg_prior: 1.0e-3
+  indicator_reg_amplitude: 1.0e-3
+  indicator_reg_amplitude_min: 0.0
+  indicator_reg_amplitude_max: 1.0
+  indicator_reg_smooth_kernel: 3
+  hard_routing_at_eval: false
+  straight_through_routing: false
+  routing_top_k: 1
+  routing_load_balance_weight: 1.0e-2
+  routing_entropy_weight: 1.0e-3
+training:
+  epochs: 60
+  batch_size: 65536
+  pred_batch_size: 65536
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 1
+  early_stop_patience: 0
+  seed: 42

@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+build/
+dist/
+.venv/
+venv/
+env/
+.env/
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Logs
+*.log
+
+# Data / artifacts
+data/
+datasets/
+src/data/
+src/experiments/
+src/validate_out/
+runs/
+wandb/
+
+# Large scientific data files
+*.npy
+*.npz
+*.pt
+*.pth
+*.ckpt
+*.h5
+*.hdf5
+*.vtu
+*.vtk
+*.nc
+*.csv
+
+# Generated figures
+*.png
+*.jpg
+*.jpeg
+*.tif
+*.tiff
+
+# Jupyter
+.ipynb_checkpoints/

@@ -1,0 +1,26 @@
+experiment: exp4_siren_resnet_xyzt_to_e
+exp_id: sirenres-centroids-e
+experiment_root: experiments
+data:
+  dataset_name: centroids
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/centroids/train/coords_xyzt.npy
+  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  normalize: true
+model:
+  name: siren_resnet
+  in_features: 4
+  out_features: 24
+  first_omega_0: 30.0
+  hidden_omega_0: 30.0
+training:
+  epochs: 60
+  batch_size: 65536
+  pred_batch_size: 65536
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 4
+  save_every: 10
+  early_stop_patience: 0
+  seed: 42
