@@ -75,7 +75,6 @@ class SirenMLP(nn.Module):
         h = self.mlp(x)
         return self.final(h)
 
-
 class ExpertEncoder(nn.Module):
     """Expert encoder that maps coords to latent features."""
 
@@ -119,7 +118,6 @@ class ExpertEncoder(nn.Module):
             x = self.pos_enc(x)
         return self.mlp(x)
 
-
 class ViewGating(nn.Module):
     """View-conditioned gating that outputs expert routing probabilities."""
 
@@ -148,7 +146,6 @@ class ViewGating(nn.Module):
         logits = self.gate(gate_in)
         probs = torch.softmax(logits, dim=-1)
         return probs, logits
-
 
 class MoEINRExpertsPool(nn.Module):
     """
@@ -294,7 +291,6 @@ class MoEINRExpertsPool(nn.Module):
             return output, aux
         return output
 
-
 class MultiViewCoordDataset(Dataset):
     """
     Dataset for shared coords with multiple attribute targets.
@@ -365,7 +361,6 @@ class MultiViewCoordDataset(Dataset):
         mean = self.y_mean[name].to(y_norm.device)
         std = self.y_std[name].to(y_norm.device)
         return y_norm * std + mean
-
 
 def reconstruction_loss(
     preds: Dict[str, torch.Tensor],

@@ -1,37 +1,35 @@
-experiment: exp6_moe_inr_xyzt_to_e_time_0
-exp_id: moeinr-centroids-e-time-0
+experiment: exp_moe_inr_e_time
+exp_id: moeinr-centroids-e_time
 experiment_root: experiments
 data:
-  dataset_name: centroids_time_0
+  dataset_name: centroids
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyz.npy
-  y_path: ./data/raw/centroids/train/targets_e_time_0.npy
+  x_path: ./data/raw/centroids/train/coords_xyzt.npy
+  y_path: ./data/raw/centroids/train/targets_e_time.npy
   normalize: true
 model:
   name: moe_inr
-  in_features: 3
+  in_features: 4
   out_features: 24
   num_experts: 7
-  encoder_feature_dim: 256
+  base_dim: 16
   encoder_num_res_blocks: 10
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
-  policy_hidden_dim: 128
   policy_num_layers: 3
   policy_first_omega_0: 30.0
   policy_hidden_omega_0: 30.0
-  expert_hidden_dim: 256
   expert_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
 training:
-  epochs: 60
-  batch_size: 8192
-  pred_batch_size: 8192
+  epochs: 30
+  batch_size: 65536
+  pred_batch_size: 65536
   lr: 5.0e-5
   val_split: 0.1
   log_every: 1
-  save_every: 1
+  save_every: 5
   early_stop_patience: 0
   seed: 42

@@ -1,24 +1,24 @@
-experiment: exp3_siren_xyzt_to_e
-exp_id: siren-centroids-e
+experiment: exp1_siren_xyz_to_u
+exp_id: siren-xyz-u
 experiment_root: experiments
 data:
-  dataset_name: centroids
+  dataset_name: xyz_u
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyzt.npy
-  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  x_path: ./data/raw/xyz_u/train/coords_xyz.npy
+  y_path: ./data/raw/xyz_u/train/targets_u.npy
   normalize: true
 model:
   name: siren
-  in_features: 4
-  out_features: 24
+  in_features: 3
+  out_features: 3
   hidden_features: 512
   hidden_layers: 5
   first_omega_0: 30.0
   hidden_omega_0: 30.0
   outermost_linear: true
 training:
-  epochs: 100
+  epochs: 500
   batch_size: 65536
   pred_batch_size: 65536
   lr: 5.0e-5

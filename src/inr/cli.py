@@ -1,18 +1,10 @@
 import argparse
 import yaml
 from pathlib import Path
-
-import torch
-
 from inr.data import NodeDataset
 from inr.models.moe_inr import build_moe_inr_from_config
 from inr.models.moe_inr_experts_pools import MultiViewCoordDataset, build_moe_inr_experts_pool
-from inr.models.conditioning_moe_inr import build_conditioning_moe_inr_from_config
-from inr.models.conditioning_moe_inr_high_low_frequency import (
-    build_conditioning_moe_inr_high_low_frequency_from_config,
-)
 from inr.models.siren import build_siren_from_config
-from inr.models.siren_resnet import build_resnet_from_config
 from inr.training.loops import TrainingConfig, train_model
 
 def parse_args():
@@ -29,23 +21,15 @@ def build_model(model_cfg, dataset=None):
     name = model_cfg["name"].lower()
     if name == "siren":
         return build_siren_from_config(model_cfg)
-    if name == "siren_resnet":
-        return build_resnet_from_config(model_cfg)
     if name in {"moe_inr", "moeinr", "moe-inr"}:
         return build_moe_inr_from_config(model_cfg)
     if name in {"moe_inr_experts_pool", "moe-inr-experts-pool", "moe_inr_expert_pool", "moe_inr_experts"}:
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("moe_inr_experts_pool requires a MultiViewCoordDataset with view_specs().")
         return build_moe_inr_experts_pool(model_cfg, dataset.view_specs())
-    if name in {"conditioning_moe_inr", "conditioning-moe-inr", "conditioning_moe"}:
-        return build_conditioning_moe_inr_from_config(model_cfg, dataset=dataset)
-    if name in {
-        "conditioning_moe_inr_high_low_frequency",
-        "conditioning-moe-inr-high-low-frequency",
-        "conditioning_moe_inr_high_low",
-        "conditioning_moe_high_low",
-    }:
-        return build_conditioning_moe_inr_high_low_frequency_from_config(model_cfg, dataset=dataset)
+    if name == "coordnet":
+        from inr.models.CoordNet import build_coordnet_from_config
+        return build_coordnet_from_config(model_cfg)
     raise ValueError(f"Unknown model name: {name}")
 
 

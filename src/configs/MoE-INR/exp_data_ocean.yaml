@@ -1,5 +1,5 @@
-experiment: exp6_moe_inr_xyzt_to_e_time_xyzt_to_velocity
-exp_id: moeinr-centroids-ocean-velocity-sub
+experiment: exp_moe_inr_xyzt_to_velocity
+exp_id: moeinr-ocean-velocity-sub
 experiment_root: experiments
 data:
   dataset_name: ocean
@@ -13,15 +13,13 @@ model:
   in_features: 4
   out_features: 3
   num_experts: 7
-  encoder_feature_dim: 256
+  base_dim: 32
   encoder_num_res_blocks: 10
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
-  policy_hidden_dim: 128
   policy_num_layers: 3
   policy_first_omega_0: 30.0
   policy_hidden_omega_0: 30.0
-  expert_hidden_dim: 256
   expert_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0

@@ -3,7 +3,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from .moe_inr import ExpertDecoder, PolicyNetwork, SharedSirenEncoder2
+from .moe_inr import ExpertDecoder, PolicyNetwork, SharedSirenEncoder
 
 
 class TimeMLP(nn.Module):
@@ -253,7 +253,7 @@ class ConditioningMoEINR(nn.Module):
         input_std: Optional[torch.Tensor] = None,
     ):
         super().__init__()
-        self.encoder = SharedSirenEncoder2(
+        self.encoder = SharedSirenEncoder(
             in_features=in_features,
             feature_dim=encoder_feature_dim,
             num_frequencies=6,
