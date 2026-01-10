@@ -1,5 +1,5 @@
-experiment: exp9_basisExpert_centroids_multiview_xyzt
-exp_id: basisExpert-centroids-multiview
+experiment: exp9_basisExpert_centroids_multiview_xyzt_no_concat
+exp_id: basisExpert-centroids-multiview-no-concat
 experiment_root: experiments
 data:
   dataset_name: centroids
@@ -13,7 +13,7 @@ data:
     targets_s_time: ./data/raw/centroids/train/targets_s_time.npy
   normalize: true
 model:
-  name: basisExperts
+  name: basisExperts_no_concat
   in_features: 4
   num_experts: 7
   expert_feature_dim: 128

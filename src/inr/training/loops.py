@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from inr.data import NodeDataset
-from inr.models.moe_inr_experts_pools import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.models.basisExperts import diversity_loss, load_balance_loss, reconstruction_loss
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
 

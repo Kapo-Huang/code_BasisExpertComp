@@ -14,7 +14,7 @@ data:
     data_Speed_time: ./data/raw/ocean/train/data_Speed_time_sub.npy
   normalize: true
 model:
-  name: moe_inr_experts_pool
+  name: basisExperts
   in_features: 4
   num_experts: 7
   expert_feature_dim: 128

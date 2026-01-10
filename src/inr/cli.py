@@ -3,7 +3,7 @@ import yaml
 from pathlib import Path
 from inr.data import NodeDataset
 from inr.models.moe_inr import build_moe_inr_from_config
-from inr.models.moe_inr_experts_pools import MultiViewCoordDataset, build_moe_inr_experts_pool
+from inr.models.basisExperts import MultiViewCoordDataset, build_basisExperts_from_config
 from inr.models.siren import build_siren_from_config
 from inr.training.loops import TrainingConfig, train_model
 
@@ -23,13 +23,23 @@ def build_model(model_cfg, dataset=None):
         return build_siren_from_config(model_cfg)
     if name in {"moe_inr", "moeinr", "moe-inr"}:
         return build_moe_inr_from_config(model_cfg)
-    if name in {"moe_inr_experts_pool", "moe-inr-experts-pool", "moe_inr_expert_pool", "moe_inr_experts"}:
+    if name in {"basisexperts", "basis_experts", "basis-experts"}:
         if dataset is None or not hasattr(dataset, "view_specs"):
-            raise ValueError("moe_inr_experts_pool requires a MultiViewCoordDataset with view_specs().")
-        return build_moe_inr_experts_pool(model_cfg, dataset.view_specs())
+            raise ValueError("basisExperts requires a MultiViewCoordDataset with view_specs().")
+        return build_basisExperts_from_config(model_cfg, dataset.view_specs())
+    if name in {"basisexperts_attention", "basis_experts_attention", "basis-experts-attention"}:
+        from inr.models.basisExperts_attention import build_basisExperts_attention_from_config
+        if dataset is None or not hasattr(dataset, "view_specs"):
+            raise ValueError("basisExperts_attention requires a MultiViewCoordDataset with view_specs().")
+        return build_basisExperts_attention_from_config(model_cfg, dataset.view_specs())
     if name == "coordnet":
         from inr.models.CoordNet import build_coordnet_from_config
         return build_coordnet_from_config(model_cfg)
+    if name == "basisexperts_no_concat":
+        from inr.models.basisExperts_no_concat import build_basisExperts_no_concat_from_config
+        if dataset is None or not hasattr(dataset, "view_specs"):
+            raise ValueError("basisExperts_no_concat requires a MultiViewCoordDataset with view_specs().")
+        return build_basisExperts_no_concat_from_config(model_cfg, dataset.view_specs())
     raise ValueError(f"Unknown model name: {name}")
 
 

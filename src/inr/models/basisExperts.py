@@ -77,7 +77,6 @@ class SirenMLP(nn.Module):
 
 class ExpertEncoder(nn.Module):
     """Expert encoder that maps coords to latent features."""
-
     def __init__(
         self,
         in_features: int,
@@ -147,7 +146,7 @@ class ViewGating(nn.Module):
         probs = torch.softmax(logits, dim=-1)
         return probs, logits
 
-class MoEINRExpertsPool(nn.Module):
+class BasisExperts(nn.Module):
     """
     DMVC-CE style MoE-INR:
     - experts pool as a soft-shared encoder
@@ -254,6 +253,7 @@ class MoEINRExpertsPool(nn.Module):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
+        # Compute expert features
         expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
 
         probs_list: List[torch.Tensor] = []
@@ -261,15 +261,17 @@ class MoEINRExpertsPool(nn.Module):
         h_views: List[torch.Tensor] = []
 
         for view_idx, _name in enumerate(self.view_names):
+            # Get gating probabilities for this view
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
             probs, _ = self.gating(coords, view_embed)
             mask = self._topk_mask(probs)
             masked_probs = probs * mask
             masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
+            # Fuse expert features for this view
             weights = masked_probs if hard_topk else probs
-
             h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
+
             probs_list.append(probs)
             masks_list.append(mask)
             h_views.append(h_v)
@@ -362,6 +364,7 @@ class MultiViewCoordDataset(Dataset):
         std = self.y_std[name].to(y_norm.device)
         return y_norm * std + mean
 
+# 重建损失
 def reconstruction_loss(
     preds: Dict[str, torch.Tensor],
     targets: Dict[str, torch.Tensor],
@@ -382,13 +385,13 @@ def reconstruction_loss(
             total = total + weight * F.l1_loss(pred, target)
     return total
 
-
+# 专家负载均衡
 def load_balance_loss(probs: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     rho = masks.mean(dim=(0, 1))
     rho_hat = probs.mean(dim=(0, 1))
     return torch.mean(rho * rho_hat)
 
-
+# 专家之间的多样性
 def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
     num_experts = expert_feats.shape[1]
     if num_experts < 2:
@@ -400,42 +403,42 @@ def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tens
     return (sim * mask).sum() / (mask.sum() + 1e-9)
 
 
-def example_train_step(
-    model: MoEINRExpertsPool,
-    batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]],
-    *,
-    weights: Optional[Dict[str, float]] = None,
-    lam_eq: float = 0.0,
-    gam_div: float = 0.0,
-    loss_type: str = "mse",
-) -> Dict[str, torch.Tensor]:
-    coords, targets = batch
-    preds, aux = model(coords, return_aux=True)
-    loss_recon = reconstruction_loss(preds, targets, weights=weights, loss_type=loss_type)
-    loss = loss_recon
+# def example_train_step(
+#     model: BasisExperts,
+#     batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]],
+#     *,
+#     weights: Optional[Dict[str, float]] = None,
+#     lam_eq: float = 0.0,
+#     gam_div: float = 0.0,
+#     loss_type: str = "mse",
+# ) -> Dict[str, torch.Tensor]:
+#     coords, targets = batch
+#     preds, aux = model(coords, return_aux=True)
+#     loss_recon = reconstruction_loss(preds, targets, weights=weights, loss_type=loss_type)
+#     loss = loss_recon
 
-    if lam_eq > 0.0:
-        loss_eq = load_balance_loss(aux["probs"], aux["masks"])
-        loss = loss + lam_eq * loss_eq
-    else:
-        loss_eq = torch.zeros((), device=coords.device)
+#     if lam_eq > 0.0:
+#         loss_eq = load_balance_loss(aux["probs"], aux["masks"])
+#         loss = loss + lam_eq * loss_eq
+#     else:
+#         loss_eq = torch.zeros((), device=coords.device)
 
-    if gam_div > 0.0:
-        loss_div = diversity_loss(aux["expert_feats"])
-        loss = loss + gam_div * loss_div
-    else:
-        loss_div = torch.zeros((), device=coords.device)
+#     if gam_div > 0.0:
+#         loss_div = diversity_loss(aux["expert_feats"])
+#         loss = loss + gam_div * loss_div
+#     else:
+#         loss_div = torch.zeros((), device=coords.device)
 
-    return {
-        "loss": loss,
-        "loss_recon": loss_recon,
-        "loss_eq": loss_eq,
-        "loss_div": loss_div,
-    }
+#     return {
+#         "loss": loss,
+#         "loss_recon": loss_recon,
+#         "loss_eq": loss_eq,
+#         "loss_div": loss_div,
+#     }
 
 
-def build_moe_inr_experts_pool(cfg: Dict, view_specs: Dict[str, int]) -> MoEINRExpertsPool:
-    return MoEINRExpertsPool(
+def build_basisExperts_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExperts:
+    return BasisExperts(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
