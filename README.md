@@ -70,3 +70,9 @@ training:
 - The normalization stats are stored with each checkpoint and reused for prediction.
 - Validation split is capped to 50% to avoid degenerate splits.
 - `pred_batch_size` is used to avoid OOM during full-field prediction.
+
+#测试提交-秦子然
+这是我的测试修改，用于熟悉git操作流程
+姓名：秦子然
+时间：2026年1月12日
+操作：克隆仓库-创建分支-修改README-提交推送
