@@ -1,0 +1,44 @@
+experiment: exp_data_ionization
+exp_id: basisExpert-ionization
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 2
+  target_dir: ./data/raw/ionization/train
+  normalize: true
+model:
+  name: basisExperts
+  in_features: 4
+  num_experts: 7
+  base_dim: 16
+  top_k: 2
+  expert_use_positional_encoding: true
+  expert_num_frequencies: 6
+  expert_num_layers: 3
+  gate_num_layers: 3
+  decoder_num_layers: 3
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  gate_first_omega_0: 30.0
+  gate_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+training:
+  epochs: 60
+  batch_size: 8192
+  pred_batch_size: 8192
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 1.0e-2
+  gam_div: 1.0e-3

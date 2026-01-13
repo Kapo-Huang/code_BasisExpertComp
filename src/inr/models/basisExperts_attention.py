@@ -48,6 +48,7 @@ class BasisExpertsAttention(nn.Module):
         view_specs: Dict[str, int],
         num_experts: int = 7,
         expert_feature_dim: int = 128,
+        base_dim: Optional[int] = None,
         top_k: int = 2,
         view_embed_dim: int = 16,
         expert_use_positional_encoding: bool = True,
@@ -74,6 +75,14 @@ class BasisExpertsAttention(nn.Module):
             raise ValueError("top_k must be >= 1")
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
+
+        if base_dim is not None:
+            base_dim = int(base_dim)
+            expert_feature_dim = 8 * base_dim
+            view_embed_dim = base_dim
+            expert_hidden_dim = 8 * base_dim
+            gate_hidden_dim = 8 * base_dim
+            decoder_hidden_dim = 8 * base_dim
 
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
@@ -170,9 +179,10 @@ class BasisExpertsAttention(nn.Module):
         masks_list: List[torch.Tensor] = []
         h_views: List[torch.Tensor] = []
 
+        view_ids_all = torch.arange(self.num_views, device=coords.device, dtype=torch.long)
+        view_embed_all = self.view_embedding(view_ids_all)
         for view_idx, _name in enumerate(self.view_names):
-            view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
-            view_embed = self.view_embedding(view_ids)
+            view_embed = view_embed_all[view_idx].unsqueeze(0).expand(coords.shape[0], -1)
             probs, _ = self.gating(coords, view_embed)
             mask = self._topk_mask(probs)
             masked_probs = probs * mask
@@ -214,6 +224,7 @@ class BasisExpertsAttention(nn.Module):
 
 
 def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
+    base_dim = cfg.get("base_dim")
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
     return BasisExpertsAttention(
@@ -221,6 +232,7 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
         expert_feature_dim=int(cfg.get("expert_feature_dim", 128)),
+        base_dim=base_dim,
         top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=int(cfg.get("view_embed_dim", 16)),
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),

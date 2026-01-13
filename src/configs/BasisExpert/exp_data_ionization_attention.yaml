@@ -1,32 +1,29 @@
-experiment: exp9_1_basisExpert_ocean_xyzt
-exp_id: basisExpert-ocean-multiview
+experiment: exp_data_ionization_attention
+exp_id: basisExpert-ionization-attention
 experiment_root: experiments
 data:
-  dataset_name: ocean
+  dataset_name: ionization
   split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_multi.npz
+  compute_target_stats: true
   data_root: ./data
-  x_path: ./data/raw/ocean/train/data_XYZT_sub.npy
-  attr_paths:
-    data_fort63: ./data/raw/ocean/train/data_fort63_sub.npy
-    data_fort64: ./data/raw/ocean/train/data_fort64_sub.npy
-    data_fort73: ./data/raw/ocean/train/data_fort73_sub.npy
-    data_V_time: ./data/raw/ocean/train/data_V_time_sub.npy
-    data_Speed_time: ./data/raw/ocean/train/data_Speed_time_sub.npy
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 2
+  target_dir: ./data/raw/ionization/train
   normalize: true
 model:
-  name: basisExperts
+  name: basisExperts_attention
   in_features: 4
   num_experts: 7
-  expert_feature_dim: 128
+  base_dim: 16
   top_k: 2
-  view_embed_dim: 16
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_hidden_dim: 128
   expert_num_layers: 3
-  gate_hidden_dim: 128
   gate_num_layers: 3
-  decoder_hidden_dim: 128
   decoder_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
@@ -34,6 +31,10 @@ model:
   gate_hidden_omega_0: 30.0
   decoder_first_omega_0: 30.0
   decoder_hidden_omega_0: 30.0
+  fusion_num_layers: 2
+  fusion_num_heads: 4
+  fusion_mlp_ratio: 4.0
+  fusion_dropout: 0.1
 training:
   epochs: 60
   batch_size: 8192

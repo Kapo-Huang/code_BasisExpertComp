@@ -10,7 +10,6 @@ from .io_utils import (
     match_checkpoint,
     pick_by_epoch,
     pick_pred_for_attr,
-    resolve_gt_path,
     resolve_gt_paths,
     safe_load_npy,
 )

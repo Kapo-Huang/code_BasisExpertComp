@@ -6,19 +6,29 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, Subset
 
-from inr.data import NodeDataset
+from inr.datasets.volumetric import (
+    MultiTargetVolumetricDataset,
+    VolumetricDataset,
+    make_multitarget_collate,
+    make_singletarget_collate,
+)
 from inr.models.basisExperts import diversity_loss, load_balance_loss, reconstruction_loss
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
+try:
+    from tqdm import tqdm
+except Exception:
+    tqdm = None
 
 
 @dataclass
 class TrainingConfig:
     epochs: int = 100
-    batch_size: int = 65536
-    pred_batch_size: int = 65536
+    batch_size: int = 8000
+    pred_batch_size: int = 8000
+    num_workers: int = 4
     lr: float = 5e-5
     val_split: float = 0.1
     log_every: int = 4
@@ -28,8 +38,6 @@ class TrainingConfig:
     save_model: str = "outputs/model.pth"
     save_pred: str = "outputs/pred.npy"
     device: Optional[str] = None
-    data_x_path: str = ""
-    data_y_path: str = ""
     exp_dir: str = ""
     exp_id: str = ""
     loss_type: str = "mse"
@@ -50,7 +58,11 @@ def _is_multiview_target(targets) -> bool:
 
 
 def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
-    preds, aux = model(xb, return_aux=True)
+    try:
+        preds, aux = model(xb, return_aux=True)
+    except TypeError:
+        preds = model(xb)
+        aux = {}
     loss_recon = reconstruction_loss(
         preds,
         yb,
@@ -59,26 +71,25 @@ def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
     )
     loss = loss_recon
 
-    if cfg.lam_eq > 0.0:
+    loss_eq = torch.zeros((), device=xb.device)
+    if cfg.lam_eq > 0.0 and "probs" in aux and "masks" in aux:
         loss_eq = load_balance_loss(aux["probs"], aux["masks"])
         loss = loss + cfg.lam_eq * loss_eq
-    else:
-        loss_eq = torch.zeros((), device=xb.device)
 
-    if cfg.gam_div > 0.0:
+    loss_div = torch.zeros((), device=xb.device)
+    if cfg.gam_div > 0.0 and "expert_feats" in aux:
         loss_div = diversity_loss(aux["expert_feats"])
         loss = loss + cfg.gam_div * loss_div
-    else:
-        loss_div = torch.zeros((), device=xb.device)
 
     return loss, loss_recon, loss_eq, loss_div
 
 
 def build_dataloaders(
     dataset: Dataset, cfg: TrainingConfig
-) -> Tuple[DataLoader, Optional[DataLoader], Optional[NodeDataset], Optional[NodeDataset]]:
+) -> Tuple[DataLoader, Optional[DataLoader], Dataset, Optional[Dataset]]:
     val_ratio = max(0.0, min(0.5, float(cfg.val_split)))
     n_total = len(dataset)
+
     n_val = int(round(n_total * val_ratio))
     n_val = max(1 if val_ratio > 0 else 0, n_val)
     n_train = n_total - n_val
@@ -92,37 +103,64 @@ def build_dataloaders(
     else:
         train_ds, val_ds = dataset, None
 
+    def _resolve_collate(ds: Dataset):
+        base_ds = ds.dataset if isinstance(ds, Subset) else ds
+        if isinstance(base_ds, MultiTargetVolumetricDataset):
+            return make_multitarget_collate(base_ds)
+        if isinstance(base_ds, VolumetricDataset):
+            return make_singletarget_collate(base_ds)
+        return None
+
+    train_collate = _resolve_collate(train_ds)
+    train_kwargs = {
+        "pin_memory": True,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.num_workers > 0,
+    }
+    if cfg.num_workers > 0:
+        train_kwargs["prefetch_factor"] = 4
+    if train_collate is not None:
+        train_kwargs["collate_fn"] = train_collate
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
-        shuffle=True,
-        pin_memory=True,
-        num_workers=8,
-        persistent_workers=True,
-        prefetch_factor=4,
+        shuffle=False,
+        **train_kwargs,
     )
     val_loader = None
     if val_ds is not None:
+        val_collate = _resolve_collate(val_ds)
+        val_kwargs = {
+            "pin_memory": True,
+            "num_workers": cfg.num_workers,
+            "persistent_workers": cfg.num_workers > 0,
+        }
+        if cfg.num_workers > 0:
+            val_kwargs["prefetch_factor"] = 4
+        if val_collate is not None:
+            val_kwargs["collate_fn"] = val_collate
         val_loader = DataLoader(
             val_ds,
             batch_size=cfg.batch_size,
             shuffle=False,
-            pin_memory=True,
-            num_workers=8,
-            persistent_workers=True,
-            prefetch_factor=4,
+            **val_kwargs,
         )
     return train_loader, val_loader, train_ds, val_ds
 
 
 def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
+    t0 = time.perf_counter()
     train_loader, val_loader, train_ds, val_ds = build_dataloaders(dataset, cfg)
+    print(f"DataLoader build: {time.perf_counter() - t0:.2f}s")
     is_multiview = hasattr(dataset, "view_specs")
 
     model = model.to(device)
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
-    criterion = torch.nn.MSELoss()
+    if cfg.loss_type == "l1":
+        criterion = torch.nn.L1Loss()
+    else:
+        criterion = torch.nn.MSELoss()
 
     start_time = time.time()
     best_val = float("inf")
@@ -132,7 +170,15 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         epoch_loss = 0.0
-        for batch in train_loader:
+        data_time = 0.0
+        compute_time = 0.0
+        iterator = train_loader
+        if tqdm is not None:
+            iterator = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.epochs}", leave=False)
+        prev_time = time.perf_counter()
+        for batch in iterator:
+            data_time += time.perf_counter() - prev_time
+            step_start = time.perf_counter()
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device)
             if _is_multiview_target(yb):
@@ -155,6 +201,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             loss.backward()
             optim.step()
             epoch_loss += loss.item() * xb.shape[0]
+            compute_time += time.perf_counter() - step_start
+            prev_time = time.perf_counter()
         epoch_loss /= len(train_ds)
 
         val_loss = None
@@ -176,11 +224,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
 
         if epoch % cfg.log_every == 0 or epoch == 1:
             elapsed = time.time() - start_time
-            # calculate PSNR
             if val_loader is not None and not is_multiview:
                 with torch.no_grad():
                     preds, gts = [], []
-                    for batch in val_loader:
+                    val_iter = val_loader
+                    if tqdm is not None:
+                        val_iter = tqdm(val_loader, desc=f"val {epoch}/{cfg.epochs}", leave=False)
+                    for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device)
                         pred = model(xb)
@@ -198,7 +248,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 with torch.no_grad():
                     pred_dict = {}
                     gt_dict = {}
-                    for batch in val_loader:
+                    val_iter = val_loader
+                    if tqdm is not None:
+                        val_iter = tqdm(val_loader, desc=f"val {epoch}/{cfg.epochs}", leave=False)
+                    for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device)
                         preds = model(xb)
@@ -223,13 +276,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
                     f"val={val_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
                 )
-            elif val_loader is not None:
-                print(
-                    f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
-                    f"val={val_loss:.6e} time={elapsed:.1f}s"
-                )
             else:
                 print(f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} time={elapsed:.1f}s")
+        if epoch % cfg.log_every == 0 or epoch == 1:
+            print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
             save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}")
             predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
@@ -244,7 +294,10 @@ def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConf
     model.eval()
     loss_sum = 0.0
     with torch.no_grad():
-        for batch in loader:
+        iterator = loader
+        if tqdm is not None:
+            iterator = tqdm(loader, desc="eval", leave=False)
+        for batch in iterator:
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device)
             if _is_multiview_target(yb):
@@ -260,17 +313,26 @@ def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConf
 
 def predict_full(model, dataset: Dataset, cfg: TrainingConfig, device, suffix: str = ""):
     model.eval()
+    pred_collate = None
+    if isinstance(dataset, MultiTargetVolumetricDataset):
+        pred_collate = make_multitarget_collate(dataset)
+    elif isinstance(dataset, VolumetricDataset):
+        pred_collate = make_singletarget_collate(dataset)
     loader = DataLoader(
         dataset,
         batch_size=cfg.pred_batch_size,
         shuffle=False,
         pin_memory=True,
-        num_workers=4,
+        num_workers=cfg.num_workers,
+        collate_fn=pred_collate,
     )
 
     preds = []
     with torch.no_grad():
-        for batch in loader:
+        iterator = loader
+        if tqdm is not None:
+            iterator = tqdm(loader, desc="predict_full", leave=False)
+        for batch in iterator:
             xb, _ = _unpack_batch(batch)
             xb = xb.to(device)
             pred = model(xb)

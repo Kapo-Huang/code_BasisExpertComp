@@ -23,7 +23,6 @@ env/
 
 # Data / artifacts
 data/
-datasets/
 src/data/
 src/experiments/
 src/validate_out/

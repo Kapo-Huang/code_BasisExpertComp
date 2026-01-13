@@ -25,7 +25,6 @@ class PositionalEncoding(nn.Module):
         self.in_features = in_features
         self.include_input = include_input
         self.out_dim = in_features * (int(include_input) + 2 * num_frequencies)
-        print(self.out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """

@@ -1,11 +1,9 @@
 import math
 from typing import Dict, Iterable, List, Optional, Tuple
 
-import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
-from torch.utils.data import Dataset
 
 from .siren import SineLayer
 
@@ -161,6 +159,7 @@ class BasisExperts(nn.Module):
         view_specs: Dict[str, int],
         num_experts: int = 7,
         expert_feature_dim: int = 128,
+        base_dim: Optional[int] = None,
         top_k: int = 2,
         view_embed_dim: int = 16,
         expert_use_positional_encoding: bool = True,
@@ -183,6 +182,14 @@ class BasisExperts(nn.Module):
             raise ValueError("top_k must be >= 1")
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
+
+        if base_dim is not None:
+            base_dim = int(base_dim)
+            expert_feature_dim = 8 * base_dim
+            view_embed_dim = base_dim
+            expert_hidden_dim = 8 * base_dim
+            gate_hidden_dim = 8 * base_dim
+            decoder_hidden_dim = 8 * base_dim
 
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
@@ -293,77 +300,6 @@ class BasisExperts(nn.Module):
             return output, aux
         return output
 
-class MultiViewCoordDataset(Dataset):
-    """
-    Dataset for shared coords with multiple attribute targets.
-
-    coords.npy: (N, D)
-    y_attr.npy: (N, C_attr)
-    """
-
-    def __init__(
-        self,
-        coords_path: str,
-        attr_paths: Dict[str, str],
-        normalize: bool = True,
-    ):
-        coords = np.load(coords_path, mmap_mode="r")
-        if not attr_paths:
-            raise ValueError("attr_paths must be a non-empty dict")
-
-        attrs = {}
-        for name, path in attr_paths.items():
-            data = np.load(path, mmap_mode="r")
-            if data.shape[0] != coords.shape[0]:
-                raise ValueError(f"Mismatched samples for {name}: {data.shape[0]} vs {coords.shape[0]}")
-            attrs[name] = data
-
-        self.x = torch.from_numpy(coords.astype(np.float32))
-        self.y = {name: torch.from_numpy(arr.astype(np.float32)) for name, arr in attrs.items()}
-        self.normalize = normalize
-
-        if normalize:
-            self.x_mean, self.x_std = self._compute_stats(self.x)
-            self.x = (self.x - self.x_mean) / self.x_std
-
-            self.y_mean = {}
-            self.y_std = {}
-            for name, tensor in self.y.items():
-                mean, std = self._compute_stats(tensor)
-                self.y_mean[name] = mean
-                self.y_std[name] = std
-                self.y[name] = (tensor - mean) / std
-        else:
-            self.x_mean = torch.zeros_like(self.x[:1])
-            self.x_std = torch.ones_like(self.x[:1])
-            self.y_mean = {name: torch.zeros_like(tensor[:1]) for name, tensor in self.y.items()}
-            self.y_std = {name: torch.ones_like(tensor[:1]) for name, tensor in self.y.items()}
-
-    @staticmethod
-    def _compute_stats(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
-        mean = tensor.mean(0, keepdim=True)
-        std = tensor.std(0, keepdim=True)
-        std = torch.where(std == 0, torch.ones_like(std), std)
-        return mean, std
-
-    def __len__(self):
-        return self.x.shape[0]
-
-    def __getitem__(self, idx):
-        xb = self.x[idx]
-        yb = {name: tensor[idx] for name, tensor in self.y.items()}
-        return xb, yb
-
-    def view_specs(self) -> Dict[str, int]:
-        return {name: int(tensor.shape[1]) for name, tensor in self.y.items()}
-
-    def denormalize_attr(self, name: str, y_norm: torch.Tensor) -> torch.Tensor:
-        if not self.normalize:
-            return y_norm
-        mean = self.y_mean[name].to(y_norm.device)
-        std = self.y_std[name].to(y_norm.device)
-        return y_norm * std + mean
-
 # 重建损失
 def reconstruction_loss(
     preds: Dict[str, torch.Tensor],
@@ -438,11 +374,13 @@ def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tens
 
 
 def build_basisExperts_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExperts:
+    base_dim = cfg.get("base_dim")
     return BasisExperts(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
         expert_feature_dim=int(cfg.get("expert_feature_dim", 128)),
+        base_dim=base_dim,
         top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=int(cfg.get("view_embed_dim", 16)),
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),

@@ -11,7 +11,7 @@ import pyvista as pv
 from torch.utils.data import DataLoader
 
 from inr.cli import build_model, resolve_data_paths
-from inr.data import NodeDataset
+from inr.data import MultiTargetVolumetricDataset, VolumetricDataset
 from inr.utils.io import load_checkpoint
 
 
@@ -160,20 +160,30 @@ def extract_router_distribution(
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     data_info = resolve_data_paths(data_cfg)
-    dataset = NodeDataset(
-        data_info["x_path"],
-        data_info["y_path"],
-        normalize=bool(data_cfg.get("normalize", True)),
-    )
-    inferred_in = int(getattr(dataset.x, "shape", [None, None])[1] or 0)
-    cfg_in = int(model_cfg.get("in_features", inferred_in or 0))
-    if inferred_in and cfg_in and inferred_in != cfg_in:
+    normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
+    normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
+    if data_info.get("attr_paths"):
+        dataset = MultiTargetVolumetricDataset(
+            data_info["attr_paths"],
+            volume_shape=data_info.get("volume_shape"),
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+    else:
+        dataset = VolumetricDataset(
+            data_info["y_path"],
+            volume_shape=data_info.get("volume_shape"),
+            normalize_inputs=normalize_inputs,
+            normalize_targets=normalize_targets,
+        )
+    cfg_in = int(model_cfg.get("in_features", 4))
+    if cfg_in != 4:
         print(
-            f"[{exp_dir.name}] Warning: model in_features={cfg_in} but dataset has {inferred_in}; "
-            "overriding to match dataset."
+            f"[{exp_dir.name}] Warning: model in_features={cfg_in} but volumetric coords are 4D; "
+            "overriding to 4."
         )
         model_cfg = dict(model_cfg)
-        model_cfg["in_features"] = inferred_in
+        model_cfg["in_features"] = 4
     model = build_model(model_cfg, dataset)
     print(f"[{exp_dir.name}] Stage: build model/dataset = {time.perf_counter() - t_stage:.3f}s")
 
