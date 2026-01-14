@@ -84,32 +84,19 @@ def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
     return loss, loss_recon, loss_eq, loss_div
 
 
+def _resolve_collate(ds: Dataset):
+    base_ds = ds.dataset if isinstance(ds, Subset) else ds
+    if isinstance(base_ds, MultiTargetVolumetricDataset):
+        return make_multitarget_collate(base_ds)
+    if isinstance(base_ds, VolumetricDataset):
+        return make_singletarget_collate(base_ds)
+    return None
+
+
 def build_dataloaders(
     dataset: Dataset, cfg: TrainingConfig
 ) -> Tuple[DataLoader, Optional[DataLoader], Dataset, Optional[Dataset]]:
-    val_ratio = max(0.0, min(0.5, float(cfg.val_split)))
-    n_total = len(dataset)
-
-    n_val = int(round(n_total * val_ratio))
-    n_val = max(1 if val_ratio > 0 else 0, n_val)
-    n_train = n_total - n_val
-    if n_val > 0 and n_train <= 0:
-        n_val = max(0, n_val - 1)
-        n_train = n_total - n_val
-
-    if n_val > 0:
-        g = torch.Generator().manual_seed(int(cfg.seed))
-        train_ds, val_ds = torch.utils.data.random_split(dataset, [n_train, n_val], generator=g)
-    else:
-        train_ds, val_ds = dataset, None
-
-    def _resolve_collate(ds: Dataset):
-        base_ds = ds.dataset if isinstance(ds, Subset) else ds
-        if isinstance(base_ds, MultiTargetVolumetricDataset):
-            return make_multitarget_collate(base_ds)
-        if isinstance(base_ds, VolumetricDataset):
-            return make_singletarget_collate(base_ds)
-        return None
+    train_ds, val_ds = dataset, None
 
     train_collate = _resolve_collate(train_ds)
     train_kwargs = {
@@ -154,6 +141,22 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     train_loader, val_loader, train_ds, val_ds = build_dataloaders(dataset, cfg)
     print(f"DataLoader build: {time.perf_counter() - t0:.2f}s")
     is_multiview = hasattr(dataset, "view_specs")
+    psnr_collate = _resolve_collate(dataset)
+    psnr_kwargs = {
+        "pin_memory": True,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.num_workers > 0,
+    }
+    if cfg.num_workers > 0:
+        psnr_kwargs["prefetch_factor"] = 4
+    if psnr_collate is not None:
+        psnr_kwargs["collate_fn"] = psnr_collate
+    psnr_loader = DataLoader(
+        dataset,
+        batch_size=cfg.pred_batch_size,
+        shuffle=False,
+        **psnr_kwargs,
+    )
 
     model = model.to(device)
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
@@ -224,12 +227,12 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
 
         if epoch % cfg.log_every == 0 or epoch == 1:
             elapsed = time.time() - start_time
-            if val_loader is not None and not is_multiview:
+            if not is_multiview:
                 with torch.no_grad():
                     preds, gts = [], []
-                    val_iter = val_loader
+                    val_iter = psnr_loader
                     if tqdm is not None:
-                        val_iter = tqdm(val_loader, desc=f"val {epoch}/{cfg.epochs}", leave=False)
+                        val_iter = tqdm(psnr_loader, desc=f"psnr {epoch}/{cfg.epochs}", leave=False)
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device)
@@ -244,13 +247,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 data_range = data_range if data_range > 0 else 1.0
                 psnr_val = psnr(gt_denorm.numpy(), pred_denorm.numpy(), data_range=data_range)
                 print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} PSNR={psnr_val:.2f} time={elapsed:.1f}s")
-            elif val_loader is not None and is_multiview:
+            elif is_multiview:
                 with torch.no_grad():
                     pred_dict = {}
                     gt_dict = {}
-                    val_iter = val_loader
+                    val_iter = psnr_loader
                     if tqdm is not None:
-                        val_iter = tqdm(val_loader, desc=f"val {epoch}/{cfg.epochs}", leave=False)
+                        val_iter = tqdm(psnr_loader, desc=f"psnr {epoch}/{cfg.epochs}", leave=False)
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device)
@@ -272,10 +275,16 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     psnr_val = psnr(gt_all.numpy(), pred_all.numpy(), data_range=data_range)
                     psnr_parts.append(f"{name}={psnr_val:.2f}")
                 psnr_text = " ".join(psnr_parts)
-                print(
-                    f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
-                    f"val={val_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
-                )
+                if val_loss is None:
+                    print(
+                        f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
+                        f"PSNR[{psnr_text}] time={elapsed:.1f}s"
+                    )
+                else:
+                    print(
+                        f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
+                        f"val={val_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
+                    )
             else:
                 print(f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} time={elapsed:.1f}s")
         if epoch % cfg.log_every == 0 or epoch == 1:
