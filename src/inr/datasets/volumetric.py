@@ -75,40 +75,7 @@ class VolumetricDataset(Dataset):
         return self._n_samples
 
     def __getitem__(self, idx: int):
-        idx = int(idx)
-        x, y, z, t = idx_to_xyzt(idx, self.volume_shape)
-        coord = torch.tensor([x, y, z, t], dtype=torch.float32)
-        coord = (coord - self._x_mean_s) / self._x_std_s
-        target = self._read_target_flat(idx)
-        self._ensure_target_stats()
-        target = (target - self.y_mean.squeeze(0)) / self.y_std.squeeze(0)
-        return coord, target
-
-    def __getitems__(self, indices):
-        idx = np.asarray(indices, dtype=np.int64)
-
-        X = int(self.volume_shape.X)
-        Y = int(self.volume_shape.Y)
-        Z = int(self.volume_shape.Z)
-        x = idx % X
-        idx2 = idx // X
-        y = idx2 % Y
-        idx3 = idx2 // Y
-        z = idx3 % Z
-        t = idx3 // Z
-        coords = np.stack([x, y, z, t], axis=1).astype(np.float32)
-        coords = torch.from_numpy(coords)
-        coords = (coords - self._x_mean_s) / self._x_std_s
-
-        y_flat = self._ensure_y_flat()
-        self._ensure_target_stats()
-        block = np.asarray(y_flat[idx], dtype=np.float32)
-        target = torch.from_numpy(block.copy())
-        target = (target - self.y_mean.squeeze(0)) / self.y_std.squeeze(0)
-
-        coords = coords.to(torch.float32)
-        target = target.to(torch.float32)
-        return [(coords[i], target[i]) for i in range(coords.shape[0])]
+        return int(idx)
 
     def denormalize_targets(self, y_norm: torch.Tensor) -> torch.Tensor:
         self._ensure_target_stats()

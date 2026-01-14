@@ -11,7 +11,7 @@ data:
     X: 600
     Y: 248
     Z: 248
-    T: 2
+    T: 10
   target_path: ./data/raw/ionization/train/target_H+_sub.npy
   normalize: true
 model:
@@ -19,7 +19,7 @@ model:
   in_features: 4
   out_features: 1
   num_experts: 7
-  base_dim: 16
+  base_dim: 32
   policy_num_layers: 3
   expert_num_layers: 3
   encoder_first_omega_0: 30.0
@@ -30,8 +30,8 @@ model:
   expert_hidden_omega_0: 30.0
 training:
   epochs: 60
-  batch_size: 16000
-  pred_batch_size: 16000
+  batch_size: 8192
+  pred_batch_size: 8192
   num_workers: 4
   lr: 5.0e-5
   val_split: 0.1

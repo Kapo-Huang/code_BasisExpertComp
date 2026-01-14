@@ -11,7 +11,7 @@ data:
     X: 600
     Y: 248
     Z: 248
-    T: 2
+    T: 10
   target_dir: ./data/raw/ionization/train
   normalize: true
 model:

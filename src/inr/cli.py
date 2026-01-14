@@ -202,6 +202,20 @@ def build_experiment_layout(cfg, model_cfg, data_info):
         "config_snapshot": str(cfg_snapshot),
     }
 
+def _format_num(num: int) -> str:
+    return f"{num:,}"
+
+def _model_size_bytes(model) -> int:
+    total = 0
+    for p in model.parameters():
+        total += p.numel() * p.element_size()
+    for b in model.buffers():
+        total += b.numel() * b.element_size()
+    return int(total)
+
+def _format_bytes_mb(num_bytes: int) -> str:
+    return f"{num_bytes / (1024.0 * 1024.0):.2f} MB"
+
 
 def main():
     args = parse_args()
@@ -260,6 +274,15 @@ def main():
     print(f"Dataset size: {len(dataset)} samples")
     t3 = time.perf_counter()
     model = build_model(model_cfg, dataset)
+    n_params = sum(p.numel() for p in model.parameters())
+    n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    size_bytes = _model_size_bytes(model)
+    print(
+        "Model size: "
+        f"params={_format_num(n_params)} "
+        f"trainable={_format_num(n_trainable)} "
+        f"size={_format_bytes_mb(size_bytes)}"
+    )
     print(f"Model build: {time.perf_counter() - t3:.2f}s")
 
     train_cfg = TrainingConfig(
