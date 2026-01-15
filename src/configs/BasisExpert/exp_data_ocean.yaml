@@ -17,16 +17,12 @@ model:
   name: basisExperts
   in_features: 4
   num_experts: 7
-  expert_feature_dim: 128
+  base_dim: 16
   top_k: 2
-  view_embed_dim: 16
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_hidden_dim: 128
   expert_num_layers: 3
-  gate_hidden_dim: 128
   gate_num_layers: 3
-  decoder_hidden_dim: 128
   decoder_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
@@ -35,11 +31,11 @@ model:
   decoder_first_omega_0: 30.0
   decoder_hidden_omega_0: 30.0
 training:
+  num_workers: 4
   epochs: 60
   batch_size: 8192
   pred_batch_size: 8192
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 1
   save_every: 5
   early_stop_patience: 0

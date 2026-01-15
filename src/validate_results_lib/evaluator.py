@@ -213,6 +213,8 @@ def validate_experiment(
             t_stage = time.perf_counter()
             plot_pred_vs_gt(mesh_path, pred_series, gt_series, cmp_img, img_scale)
             print(f"[{exp_dir.name}] Stage: plot pred vs gt ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        else:
+            raise Warning(f"Mesh path not found: {mesh_path}, skipping plots.")
 
         db_size = gt_path.stat().st_size
         cr = float(db_size / model_size) if model_size and model_size > 0 else None

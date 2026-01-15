@@ -18,11 +18,11 @@ model:
   hidden_omega_0: 30.0
   outermost_linear: true
 training:
+  num_workers: 4
   epochs: 500
   batch_size: 65536
   pred_batch_size: 65536
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 4
   save_every: 10
   early_stop_patience: 0
