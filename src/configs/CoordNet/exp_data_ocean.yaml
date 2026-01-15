@@ -15,11 +15,11 @@ model:
   init_features: 64
   num_res: 10
 training:
+  num_workers: 4
   epochs: 60
   batch_size: 8192
   pred_batch_size: 8192
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 1
   save_every: 5
   early_stop_patience: 0

@@ -23,11 +23,11 @@ def build_model(model_cfg, dataset=None):
         return build_siren_from_config(model_cfg)
     if name in {"moe_inr", "moeinr", "moe-inr"}:
         return build_moe_inr_from_config(model_cfg)
-    if name in {"basisexperts", "basis_experts", "basis-experts"}:
+    if name in {"basisexperts"}:
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts requires a MultiViewCoordDataset with view_specs().")
         return build_basisExperts_from_config(model_cfg, dataset.view_specs())
-    if name in {"basisexperts_attention", "basis_experts_attention", "basis-experts-attention"}:
+    if name in {"basisexperts_attention"}:
         from inr.models.basisExperts_attention import build_basisExperts_attention_from_config
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts_attention requires a MultiViewCoordDataset with view_specs().")
@@ -35,11 +35,6 @@ def build_model(model_cfg, dataset=None):
     if name == "coordnet":
         from inr.models.CoordNet import build_coordnet_from_config
         return build_coordnet_from_config(model_cfg)
-    if name == "basisexperts_no_concat":
-        from inr.models.basisExperts_no_concat import build_basisExperts_no_concat_from_config
-        if dataset is None or not hasattr(dataset, "view_specs"):
-            raise ValueError("basisExperts_no_concat requires a MultiViewCoordDataset with view_specs().")
-        return build_basisExperts_no_concat_from_config(model_cfg, dataset.view_specs())
     raise ValueError(f"Unknown model name: {name}")
 
 
@@ -121,18 +116,21 @@ def main():
 
     data_info = resolve_data_paths(data_cfg)
     exp_layout = build_experiment_layout(cfg, model_cfg, data_info)
+    stats_path = data_cfg.get("stats_path")
 
     if data_info.get("attr_paths"):
         dataset = MultiViewCoordDataset(
             data_info["x_path"],
             data_info["attr_paths"],
             normalize=bool(data_cfg.get("normalize", True)),
+            stats_path=stats_path,
         )
     else:
         dataset = NodeDataset(
             data_info["x_path"],
             data_info["y_path"],
             normalize=bool(data_cfg.get("normalize", True)),
+            stats_path=stats_path,
         )
     model = build_model(model_cfg, dataset)
 
@@ -140,8 +138,8 @@ def main():
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
         pred_batch_size=int(train_cfg_raw.get("pred_batch_size", train_cfg_raw.get("batch_size", 65536))),
+        num_workers=int(train_cfg_raw.get("num_workers", 4)),
         lr=float(train_cfg_raw.get("lr", 5e-5)),
-        val_split=float(train_cfg_raw.get("val_split", 0.1)),
         log_every=int(train_cfg_raw.get("log_every", 4)),
         save_every=int(train_cfg_raw.get("save_every", 0)),
         early_stop_patience=int(train_cfg_raw.get("early_stop_patience", 0)),

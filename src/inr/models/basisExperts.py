@@ -1,4 +1,5 @@
 import math
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
 import numpy as np
@@ -306,6 +307,7 @@ class MultiViewCoordDataset(Dataset):
         coords_path: str,
         attr_paths: Dict[str, str],
         normalize: bool = True,
+        stats_path: Optional[str] = None,
     ):
         coords = np.load(coords_path, mmap_mode="r")
         if not attr_paths:
@@ -318,21 +320,49 @@ class MultiViewCoordDataset(Dataset):
                 raise ValueError(f"Mismatched samples for {name}: {data.shape[0]} vs {coords.shape[0]}")
             attrs[name] = data
 
-        self.x = torch.from_numpy(coords.astype(np.float32))
-        self.y = {name: torch.from_numpy(arr.astype(np.float32)) for name, arr in attrs.items()}
+        # self.x = torch.from_numpy(coords.astype(np.float32))
+        # self.y = {name: torch.from_numpy(arr.astype(np.float32)) for name, arr in attrs.items()}
+        self.x = torch.from_numpy(coords)
+        self.y = {name: torch.from_numpy(arr) for name, arr in attrs.items()}
         self.normalize = normalize
+        self.stats_path = stats_path
 
         if normalize:
-            self.x_mean, self.x_std = self._compute_stats(self.x)
-            self.x = (self.x - self.x_mean) / self.x_std
+            stats_loaded = False
+            if stats_path and Path(stats_path).exists():
+                stats = np.load(stats_path)
+                try:
+                    self.x_mean = torch.from_numpy(stats["x_mean"]).to(torch.float32)
+                    self.x_std = torch.from_numpy(stats["x_std"]).to(torch.float32)
+                    self.y_mean = {}
+                    self.y_std = {}
+                    for name in self.y.keys():
+                        mean_key = f"y_mean_{name}"
+                        std_key = f"y_std_{name}"
+                        self.y_mean[name] = torch.from_numpy(stats[mean_key]).to(torch.float32)
+                        self.y_std[name] = torch.from_numpy(stats[std_key]).to(torch.float32)
+                        self.y_std[name] = torch.where(
+                            self.y_std[name] == 0, torch.ones_like(self.y_std[name]), self.y_std[name]
+                        )
+                    self.x_std = torch.where(self.x_std == 0, torch.ones_like(self.x_std), self.x_std)
+                    stats_loaded = True
+                except KeyError:
+                    stats_loaded = False
 
-            self.y_mean = {}
-            self.y_std = {}
+            if not stats_loaded:
+                self.x_mean, self.x_std = self._compute_stats(self.x)
+                self.y_mean = {}
+                self.y_std = {}
+                for name, tensor in self.y.items():
+                    mean, std = self._compute_stats(tensor)
+                    self.y_mean[name] = mean
+                    self.y_std[name] = std
+                if stats_path:
+                    self._save_stats(stats_path)
+
+            self.x = (self.x - self.x_mean) / self.x_std
             for name, tensor in self.y.items():
-                mean, std = self._compute_stats(tensor)
-                self.y_mean[name] = mean
-                self.y_std[name] = std
-                self.y[name] = (tensor - mean) / std
+                self.y[name] = (tensor - self.y_mean[name]) / self.y_std[name]
         else:
             self.x_mean = torch.zeros_like(self.x[:1])
             self.x_std = torch.ones_like(self.x[:1])
@@ -345,6 +375,17 @@ class MultiViewCoordDataset(Dataset):
         std = tensor.std(0, keepdim=True)
         std = torch.where(std == 0, torch.ones_like(std), std)
         return mean, std
+
+    def _save_stats(self, stats_path: str) -> None:
+        Path(stats_path).parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "x_mean": self.x_mean.numpy(),
+            "x_std": self.x_std.numpy(),
+        }
+        for name in self.y.keys():
+            payload[f"y_mean_{name}"] = self.y_mean[name].numpy()
+            payload[f"y_std_{name}"] = self.y_std[name].numpy()
+        np.savez(stats_path, **payload)
 
     def __len__(self):
         return self.x.shape[0]
@@ -438,20 +479,34 @@ def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tens
 
 
 def build_basisExperts_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExperts:
+    base_dim = cfg.get("base_dim")
+    if base_dim is not None:
+        base_dim = int(base_dim)
+        expert_feature_dim = 8 * base_dim
+        view_embed_dim = base_dim
+        expert_hidden_dim = 8 * base_dim
+        gate_hidden_dim = 8 * base_dim
+        decoder_hidden_dim = 8 * base_dim
+    else:
+        expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
+        view_embed_dim = int(cfg.get("view_embed_dim", 16))
+        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
+        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
+        decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
     return BasisExperts(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
-        expert_feature_dim=int(cfg.get("expert_feature_dim", 128)),
+        expert_feature_dim=expert_feature_dim,
         top_k=int(cfg.get("top_k", 2)),
-        view_embed_dim=int(cfg.get("view_embed_dim", 16)),
+        view_embed_dim=view_embed_dim,
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
-        expert_hidden_dim=int(cfg.get("expert_hidden_dim", 128)),
+        expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
-        gate_hidden_dim=int(cfg.get("gate_hidden_dim", 128)),
+        gate_hidden_dim=gate_hidden_dim,
         gate_num_layers=int(cfg.get("gate_num_layers", 3)),
-        decoder_hidden_dim=int(cfg.get("decoder_hidden_dim", 128)),
+        decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
