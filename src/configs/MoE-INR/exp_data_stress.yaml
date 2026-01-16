@@ -1,26 +1,25 @@
-experiment: exp_moe_inr_e_time
-exp_id: moeinr-centroids-e_time
+experiment: exp_moe_inr_point_U
+exp_id: moeinr-point-U
 experiment_root: experiments
 data:
-  dataset_name: centroids
+  dataset_name: sukong
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyzt.npy
-  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  x_path: ./data/raw/sukong/train/source_point_XYZT.npy
+  y_path: ./data/raw/sukong/train/target_point_U.npy
   normalize: true
 model:
   name: moe_inr
   in_features: 4
-  out_features: 24
+  out_features: 3
   num_experts: 7
   base_dim: 16
-  encoder_num_res_blocks: 10
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
   policy_num_layers: 3
   policy_first_omega_0: 30.0
   policy_hidden_omega_0: 30.0
-  expert_num_layers: 3
+  expert_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
 training:
