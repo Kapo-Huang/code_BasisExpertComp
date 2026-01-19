@@ -85,6 +85,7 @@ def main():
 
     if args.exp_id:
         exp_dirs = [exp_root / args.exp_id]
+        outdir = outdir / args.exp_id
     else:
         exp_dirs = collect_experiments(exp_root)
 

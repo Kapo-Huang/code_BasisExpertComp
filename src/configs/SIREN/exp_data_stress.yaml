@@ -27,3 +27,4 @@ training:
   save_every: 10
   early_stop_patience: 0
   seed: 42
+  resume_path: null

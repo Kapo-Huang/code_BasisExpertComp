@@ -276,7 +276,7 @@ class BasisExperts(nn.Module):
             probs_list.append(probs)
             masks_list.append(mask)
             h_views.append(h_v)
-
+        # Combine multi-view representations with simple concatenation
         h_views_tensor = torch.stack(h_views, dim=1)  # (B, V, F)
         h_fused = torch.cat(h_views, dim=-1)  # (B, V * F)
 
@@ -320,8 +320,6 @@ class MultiViewCoordDataset(Dataset):
                 raise ValueError(f"Mismatched samples for {name}: {data.shape[0]} vs {coords.shape[0]}")
             attrs[name] = data
 
-        # self.x = torch.from_numpy(coords.astype(np.float32))
-        # self.y = {name: torch.from_numpy(arr.astype(np.float32)) for name, arr in attrs.items()}
         self.x = torch.from_numpy(coords)
         self.y = {name: torch.from_numpy(arr) for name, arr in attrs.items()}
         self.normalize = normalize
@@ -442,41 +440,6 @@ def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tens
     sim = torch.exp(-(dists ** 2) / (2.0 * sigma * sigma))
     mask = 1.0 - torch.eye(num_experts, device=expert_feats.device)
     return (sim * mask).sum() / (mask.sum() + 1e-9)
-
-
-# def example_train_step(
-#     model: BasisExperts,
-#     batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]],
-#     *,
-#     weights: Optional[Dict[str, float]] = None,
-#     lam_eq: float = 0.0,
-#     gam_div: float = 0.0,
-#     loss_type: str = "mse",
-# ) -> Dict[str, torch.Tensor]:
-#     coords, targets = batch
-#     preds, aux = model(coords, return_aux=True)
-#     loss_recon = reconstruction_loss(preds, targets, weights=weights, loss_type=loss_type)
-#     loss = loss_recon
-
-#     if lam_eq > 0.0:
-#         loss_eq = load_balance_loss(aux["probs"], aux["masks"])
-#         loss = loss + lam_eq * loss_eq
-#     else:
-#         loss_eq = torch.zeros((), device=coords.device)
-
-#     if gam_div > 0.0:
-#         loss_div = diversity_loss(aux["expert_feats"])
-#         loss = loss + gam_div * loss_div
-#     else:
-#         loss_div = torch.zeros((), device=coords.device)
-
-#     return {
-#         "loss": loss,
-#         "loss_recon": loss_recon,
-#         "loss_eq": loss_eq,
-#         "loss_div": loss_div,
-#     }
-
 
 def build_basisExperts_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExperts:
     base_dim = cfg.get("base_dim")
