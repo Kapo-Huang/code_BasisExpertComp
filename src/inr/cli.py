@@ -37,7 +37,6 @@ def build_model(model_cfg, dataset=None):
         return build_coordnet_from_config(model_cfg)
     raise ValueError(f"Unknown model name: {name}")
 
-
 def resolve_data_paths(data_cfg):
     """
     Normalizes data paths to the new structure:
@@ -97,6 +96,8 @@ def build_experiment_layout(cfg, model_cfg, data_info):
     # Persist a copy of the launched config for reproducibility
     cfg_snapshot.write_text(yaml.safe_dump(cfg), encoding="utf-8")
 
+    print(f"Experiment ID: {exp_id}")
+
     return {
         "exp_dir": str(exp_dir),
         "exp_id": exp_id,
@@ -155,6 +156,7 @@ def main():
         lam_eq=float(train_cfg_raw.get("lam_eq", 0.0)),
         gam_div=float(train_cfg_raw.get("gam_div", 0.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
+        resume_path=train_cfg_raw.get("resume_path"),
     )
 
     train_model(model, dataset, train_cfg)

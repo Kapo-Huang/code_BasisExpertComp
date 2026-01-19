@@ -14,14 +14,14 @@ data:
     data_Speed_time: ./data/raw/ocean/train/data_Speed_time_sub.npy
   normalize: true
 model:
-  name: basisExperts
+  name: basisExperts_attention
   in_features: 4
   num_experts: 7
-  base_dim: 16
+  base_dim: 10
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_num_layers: 3
+  expert_num_layers: 2
   gate_num_layers: 3
   decoder_num_layers: 3
   expert_first_omega_0: 30.0
@@ -30,6 +30,10 @@ model:
   gate_hidden_omega_0: 30.0
   decoder_first_omega_0: 30.0
   decoder_hidden_omega_0: 30.0
+  fusion_num_layers: 2
+  fusion_num_heads: 4
+  fusion_mlp_ratio: 4.0
+  fusion_dropout: 0.1
 training:
   num_workers: 4
   epochs: 60

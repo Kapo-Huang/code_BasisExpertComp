@@ -10,7 +10,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from inr.data import NodeDataset
 from inr.models.basisExperts import diversity_loss, load_balance_loss, reconstruction_loss
-from inr.utils.io import save_checkpoint
+from inr.utils.io import load_checkpoint, save_checkpoint
 try:
     from tqdm import tqdm
 except Exception:
@@ -38,6 +38,7 @@ class TrainingConfig:
     lam_eq: float = 0.0
     gam_div: float = 0.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
+    resume_path: Optional[str] = None
 
 
 def _unpack_batch(batch):
@@ -106,8 +107,24 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
     criterion = torch.nn.MSELoss()
 
+    start_epoch = 1
+    if cfg.resume_path:
+        checkpoint = load_checkpoint(cfg.resume_path, model)
+        resume_epoch = int(checkpoint.get("epoch", 0) or 0)
+        optim_state = checkpoint.get("optimizer_state")
+        if optim_state is not None:
+            try:
+                optim.load_state_dict(optim_state)
+            except Exception as exc:
+                print(f"Warning: failed to load optimizer state from {cfg.resume_path}: {exc}")
+        if resume_epoch > 0:
+            start_epoch = resume_epoch + 1
+        if start_epoch > cfg.epochs:
+            print(f"Resume epoch {resume_epoch} >= total epochs {cfg.epochs}; skipping training.")
+            return
+
     start_time = time.time()
-    for epoch in range(1, cfg.epochs + 1):
+    for epoch in range(start_epoch, cfg.epochs + 1):
         model.train()
         epoch_loss = 0.0
         iterator = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.epochs}", leave=False)
@@ -152,10 +169,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
                 )
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
-            save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}")
+            save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}", epoch=epoch, optimizer=optim)
             predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
 
-    save_checkpoint(model, dataset, cfg.save_model)
+    save_checkpoint(model, dataset, cfg.save_model, epoch=cfg.epochs, optimizer=optim)
     predict_full(model, dataset, cfg, device)
 
 
