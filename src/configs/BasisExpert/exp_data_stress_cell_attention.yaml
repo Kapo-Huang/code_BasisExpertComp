@@ -1,5 +1,5 @@
-experiment: exp9_basisExpert_sukong_multiview_xyzt_attention
-exp_id: basisExpert-sukong-multiview-attention
+experiment: exp9_basisExpert_sukong_multiview_xyzt_attention-high-CR
+exp_id: basisExpert-sukong-multiview-attention-high-CR
 experiment_root: experiments
 data:
   dataset_name: sukong
@@ -16,13 +16,13 @@ model:
   name: basisExperts_attention
   in_features: 4
   num_experts: 7
-  base_dim: 10
+  base_dim: 8
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
   expert_num_layers: 2
   gate_num_layers: 3
-  decoder_num_layers: 3
+  decoder_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
   gate_first_omega_0: 30.0
