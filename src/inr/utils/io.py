@@ -9,7 +9,14 @@ def ensure_dir(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def save_checkpoint(model: torch.nn.Module, dataset, path: str, suffix: str = ""):
+def save_checkpoint(
+    model: torch.nn.Module,
+    dataset,
+    path: str,
+    suffix: str = "",
+    epoch: int | None = None,
+    optimizer: torch.optim.Optimizer | None = None,
+):
     save_path = path if suffix == "" else f"{path[:-4]}{suffix}.pth"
     ensure_dir(save_path)
     def _to_numpy(value):
@@ -26,6 +33,10 @@ def save_checkpoint(model: torch.nn.Module, dataset, path: str, suffix: str = ""
         "y_mean": _to_numpy(getattr(dataset, "y_mean", None)),
         "y_std": _to_numpy(getattr(dataset, "y_std", None)),
     }
+    if epoch is not None:
+        payload["epoch"] = int(epoch)
+    if optimizer is not None:
+        payload["optimizer_state"] = optimizer.state_dict()
     torch.save(payload, save_path)
     print(f"Saved checkpoint to {save_path}")
 

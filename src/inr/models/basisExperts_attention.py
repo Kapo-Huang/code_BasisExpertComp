@@ -216,20 +216,34 @@ class BasisExpertsAttention(nn.Module):
 def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
+    base_dim = cfg.get("base_dim")
+    if base_dim is not None:
+        base_dim = int(base_dim)
+        expert_feature_dim = 8 * base_dim
+        view_embed_dim = base_dim
+        expert_hidden_dim = 8 * base_dim
+        gate_hidden_dim = 8 * base_dim
+        decoder_hidden_dim = 8 * base_dim
+    else:
+        expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
+        view_embed_dim = int(cfg.get("view_embed_dim", 16))
+        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
+        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
+        decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
     return BasisExpertsAttention(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
-        expert_feature_dim=int(cfg.get("expert_feature_dim", 128)),
+        expert_feature_dim=expert_feature_dim,
         top_k=int(cfg.get("top_k", 2)),
-        view_embed_dim=int(cfg.get("view_embed_dim", 16)),
+        view_embed_dim=view_embed_dim,
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
-        expert_hidden_dim=int(cfg.get("expert_hidden_dim", 128)),
+        expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
-        gate_hidden_dim=int(cfg.get("gate_hidden_dim", 128)),
+        gate_hidden_dim=gate_hidden_dim,
         gate_num_layers=int(cfg.get("gate_num_layers", 3)),
-        decoder_hidden_dim=int(cfg.get("decoder_hidden_dim", 128)),
+        decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),

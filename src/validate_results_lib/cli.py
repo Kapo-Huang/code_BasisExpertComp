@@ -11,7 +11,7 @@ def main():
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
     parser.add_argument("--csv", type=str, default="validate_out/validation_results.csv", help="csv path to append")
     parser.add_argument("--exp-id", type=str, default=None, help="single experiment id to validate")
-    parser.add_argument("--mesh", type=str, default="data/raw/mesh_vtu/sukong_zip_0_0.vtu", help="mesh vtu path")
+    parser.add_argument("--mesh", type=str, default="data/raw/sukong/validate_mesh/sukong_zip_0_0.vtu", help="mesh vtu path")
     parser.add_argument("--n-frames", type=int, default=10, help="number of time frames to split for plotting")
     parser.add_argument("--epoch", type=int, required=True, help="epoch number to select pred/ckpt")
     parser.add_argument("--img-scale", type=float, default=2.0, help="scale factor for plot resolution")
@@ -85,6 +85,7 @@ def main():
 
     if args.exp_id:
         exp_dirs = [exp_root / args.exp_id]
+        outdir = outdir / args.exp_id
     else:
         exp_dirs = collect_experiments(exp_root)
 

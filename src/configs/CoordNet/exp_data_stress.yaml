@@ -15,12 +15,13 @@ model:
   init_features: 32
   num_res: 5
 training:
+  num_workers: 4
   epochs: 60
   batch_size: 65536
   pred_batch_size: 65536
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 1
   save_every: 5
   early_stop_patience: 0
   seed: 42
+  resume_path: null

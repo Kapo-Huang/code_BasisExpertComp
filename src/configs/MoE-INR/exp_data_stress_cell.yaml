@@ -1,35 +1,35 @@
-experiment: exp_moe_inr_e_time
-exp_id: moeinr-centroids-e_time
+experiment: exp_moe_inr_cell_E
+exp_id: moeinr-cell-E
 experiment_root: experiments
 data:
-  dataset_name: centroids
+  dataset_name: sukong
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyzt.npy
-  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  y_path: ./data/raw/sukong/train/targets_cell_E.npy
   normalize: true
 model:
   name: moe_inr
   in_features: 4
   out_features: 24
   num_experts: 7
-  base_dim: 16
-  encoder_num_res_blocks: 10
+  base_dim: 14
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
   policy_num_layers: 3
   policy_first_omega_0: 30.0
   policy_hidden_omega_0: 30.0
-  expert_num_layers: 3
+  expert_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
 training:
-  epochs: 30
-  batch_size: 65536
-  pred_batch_size: 65536
+  num_workers: 4
+  epochs: 60
+  batch_size: 16000
+  pred_batch_size: 16000
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 1
-  save_every: 5
+  save_every: 10
   early_stop_patience: 0
   seed: 42
+  resume_path: null

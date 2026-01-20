@@ -1,31 +1,25 @@
-experiment: exp9_basisExpert_centroids_multiview_xyzt_attention
-exp_id: basisExpert-centroids-multiview-attention
+experiment: exp9_basisExpert_sukong_point
+exp_id: basisExpert-sukong-point
 experiment_root: experiments
 data:
-  dataset_name: centroids
+  dataset_name: sukong
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyzt.npy
+  x_path: ./data/raw/sukong/train/source_point_XYZT.npy
   attr_paths:
-    target_s_centroid_time: ./data/raw/centroids/train/target_s_centroid_time.npy
-    target_t_centroid_time: ./data/raw/centroids/train/target_e_centroid_time.npy
-    targets_e_time: ./data/raw/centroids/train/targets_e_time.npy
-    targets_s_time: ./data/raw/centroids/train/targets_s_time.npy
+    target_point_RF: ./data/raw/sukong/train/target_point_RF.npy
+    target_point_U: ./data/raw/sukong/train/target_point_U.npy
   normalize: true
 model:
   name: basisExperts_attention
   in_features: 4
   num_experts: 7
-  expert_feature_dim: 128
+  base_dim: 8
   top_k: 2
-  view_embed_dim: 16
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_hidden_dim: 128
   expert_num_layers: 3
-  gate_hidden_dim: 128
   gate_num_layers: 3
-  decoder_hidden_dim: 128
   decoder_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
@@ -38,13 +32,13 @@ model:
   fusion_mlp_ratio: 4.0
   fusion_dropout: 0.1
 training:
+  num_workers: 4
   epochs: 60
   batch_size: 8192
   pred_batch_size: 8192
   lr: 5.0e-5
-  val_split: 0.1
   log_every: 1
-  save_every: 5
+  save_every: 10
   early_stop_patience: 0
   seed: 42
   loss_type: mse
