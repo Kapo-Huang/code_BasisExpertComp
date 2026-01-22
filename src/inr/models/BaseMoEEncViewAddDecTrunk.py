@@ -1,4 +1,4 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
@@ -6,40 +6,12 @@ import torch.nn as nn
 from .basisExpert_simple_concat import ExpertEncoder, SirenMLP, ViewGating
 
 
-class TinyTransformerFusion(nn.Module):
-    """Lightweight transformer encoder for cross-view fusion."""
-
-    def __init__(
-        self,
-        feature_dim: int,
-        num_layers: int = 2,
-        num_heads: int = 4,
-        mlp_ratio: float = 4.0,
-        dropout: float = 0.1,
-    ):
-        super().__init__()
-        if feature_dim % num_heads != 0:
-            raise ValueError("feature_dim must be divisible by num_heads")
-
-        ff_dim = int(feature_dim * mlp_ratio)
-        encoder_layer = nn.TransformerEncoderLayer(
-            d_model=feature_dim,
-            nhead=num_heads,
-            dim_feedforward=ff_dim,
-            dropout=dropout,
-            activation="gelu",
-            batch_first=True,
-            norm_first=True,
-        )
-        self.encoder = nn.TransformerEncoder(encoder_layer, num_layers=num_layers)
-
-    def forward(self, tokens: torch.Tensor) -> torch.Tensor:
-        return self.encoder(tokens)
-
-
-class BasisExpertsAttention(nn.Module):
+class BaseMoEEncViewAddDecTrunk(nn.Module):
     """
-    MoE-INR with cross-view transformer fusion and fixed decoder input size.
+    MoE-encoder baseline:
+    - expert encoders + view-conditioned gating -> h_view
+    - view embedding added to h_view (no fusion)
+    - per-view decoders map h_view -> attribute
     """
 
     def __init__(
@@ -64,10 +36,6 @@ class BasisExpertsAttention(nn.Module):
         gate_hidden_omega_0: float = 30.0,
         decoder_first_omega_0: float = 30.0,
         decoder_hidden_omega_0: float = 30.0,
-        fusion_num_layers: int = 2,
-        fusion_num_heads: Optional[int] = None,
-        fusion_mlp_ratio: float = 4.0,
-        fusion_dropout: float = 0.1,
     ):
         super().__init__()
         if top_k < 1:
@@ -110,22 +78,10 @@ class BasisExpertsAttention(nn.Module):
             ]
         )
 
-        num_heads = self._resolve_num_heads(expert_feature_dim, fusion_num_heads)
-        self.ctx_token = nn.Parameter(torch.zeros(1, 1, expert_feature_dim))
-        nn.init.normal_(self.ctx_token, std=0.02)
-        self.fusion = TinyTransformerFusion(
-            feature_dim=expert_feature_dim,
-            num_layers=fusion_num_layers,
-            num_heads=num_heads,
-            mlp_ratio=fusion_mlp_ratio,
-            dropout=fusion_dropout,
-        )
-
-        fused_dim = expert_feature_dim * 2
         self.decoders = nn.ModuleDict(
             {
                 name: SirenMLP(
-                    in_dim=fused_dim,
+                    in_dim=expert_feature_dim,
                     out_dim=out_dim,
                     hidden_dim=decoder_hidden_dim,
                     num_layers=decoder_num_layers,
@@ -135,18 +91,6 @@ class BasisExpertsAttention(nn.Module):
                 for name, out_dim in self.view_dims.items()
             }
         )
-
-    @staticmethod
-    def _resolve_num_heads(feature_dim: int, requested: Optional[int]) -> int:
-        if requested is not None:
-            if feature_dim % requested != 0:
-                raise ValueError("fusion_num_heads must divide expert_feature_dim")
-            return requested
-        preferred = 8 if feature_dim >= 256 else 4
-        for candidate in (preferred, 4, 2, 1, 8):
-            if feature_dim % candidate == 0:
-                return candidate
-        return 1
 
     def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
         _, indices = torch.topk(probs, k=self.top_k, dim=-1)
@@ -166,11 +110,12 @@ class BasisExpertsAttention(nn.Module):
 
         expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
 
+        preds = {}
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
         h_views: List[torch.Tensor] = []
 
-        for view_idx, _name in enumerate(self.view_names):
+        for view_idx, name in enumerate(self.view_names):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
             probs, _ = self.gating(coords, view_embed)
@@ -179,43 +124,29 @@ class BasisExpertsAttention(nn.Module):
             masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
             weights = masked_probs if hard_topk else probs
 
-            h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-            h_v = h_v + self.view_embed_proj(view_embed)
+            h_view = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
+            h_view = h_view + self.view_embed_proj(view_embed)
+
+            preds[name] = self.decoders[name](h_view)
             probs_list.append(probs)
             masks_list.append(mask)
-            h_views.append(h_v)
-
-        h_views_tensor = torch.stack(h_views, dim=1)  # (B, V, F)
-        ctx = self.ctx_token.expand(coords.shape[0], -1, -1)
-        tokens = torch.cat([ctx, h_views_tensor], dim=1)
-        tokens = self.fusion(tokens)
-
-        ctx_out = tokens[:, :1, :]
-        h_views_fused = tokens[:, 1:, :]
-        ctx_flat = ctx_out.squeeze(1)
-
-        preds = {}
-        for view_idx, name in enumerate(self.view_names):
-            z_v = torch.cat([h_views_fused[:, view_idx, :], ctx_flat], dim=-1)
-            preds[name] = self.decoders[name](z_v)
+            h_views.append(h_view)
 
         output = preds if request is None else preds[request]
         if return_aux:
             aux = {
                 "probs": torch.stack(probs_list, dim=1),  # (B, V, M)
                 "masks": torch.stack(masks_list, dim=1),  # (B, V, M)
-                "H_views": h_views_tensor,
-                "H_views_fused": h_views_fused,
-                "CTX": ctx_out,
+                "H_views": torch.stack(h_views, dim=1),
                 "expert_feats": expert_feats,
             }
             return output, aux
         return output
 
 
-def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
-    fusion_num_heads_raw = cfg.get("fusion_num_heads")
-    fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
+def build_base_moe_enc_view_add_dec_trunk_from_config(
+    cfg: Dict, view_specs: Dict[str, int]
+) -> BaseMoEEncViewAddDecTrunk:
     base_dim = cfg.get("base_dim")
     if base_dim is not None:
         base_dim = int(base_dim)
@@ -230,7 +161,7 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
         gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
         decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
-    return BasisExpertsAttention(
+    return BaseMoEEncViewAddDecTrunk(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
@@ -251,8 +182,4 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         gate_hidden_omega_0=float(cfg.get("gate_hidden_omega_0", 30.0)),
         decoder_first_omega_0=float(cfg.get("decoder_first_omega_0", 30.0)),
         decoder_hidden_omega_0=float(cfg.get("decoder_hidden_omega_0", 30.0)),
-        fusion_num_layers=int(cfg.get("fusion_num_layers", 2)),
-        fusion_num_heads=fusion_num_heads,
-        fusion_mlp_ratio=float(cfg.get("fusion_mlp_ratio", 4.0)),
-        fusion_dropout=float(cfg.get("fusion_dropout", 0.1)),
     )

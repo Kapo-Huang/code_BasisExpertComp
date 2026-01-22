@@ -1,9 +1,9 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
-from .basisExpert_simple_concat import ExpertEncoder, SirenMLP, ViewGating
+from .basisExpert_simple_concat import ExpertEncoder, SirenMLP
 
 
 class TinyTransformerFusion(nn.Module):
@@ -37,77 +37,58 @@ class TinyTransformerFusion(nn.Module):
         return self.encoder(tokens)
 
 
-class BasisExpertsAttention(nn.Module):
+class BasisExpertNoMoE(nn.Module):
     """
-    MoE-INR with cross-view transformer fusion and fixed decoder input size.
+    Shared-encoder INR with attention fusion:
+    - shared encoder for all views (no experts, no routing)
+    - view embedding added to per-view features
+    - transformer fusion + context token
     """
 
     def __init__(
         self,
         in_features: int,
         view_specs: Dict[str, int],
-        num_experts: int = 7,
         expert_feature_dim: int = 128,
-        top_k: int = 2,
         view_embed_dim: int = 16,
         expert_use_positional_encoding: bool = True,
         expert_num_frequencies: int = 6,
         expert_hidden_dim: int = 128,
         expert_num_layers: int = 3,
-        gate_hidden_dim: int = 128,
-        gate_num_layers: int = 3,
         decoder_hidden_dim: int = 128,
         decoder_num_layers: int = 3,
         expert_first_omega_0: float = 30.0,
         expert_hidden_omega_0: float = 30.0,
-        gate_first_omega_0: float = 30.0,
-        gate_hidden_omega_0: float = 30.0,
         decoder_first_omega_0: float = 30.0,
         decoder_hidden_omega_0: float = 30.0,
         fusion_num_layers: int = 2,
         fusion_num_heads: Optional[int] = None,
         fusion_mlp_ratio: float = 4.0,
         fusion_dropout: float = 0.1,
+        num_experts: int = 1,
     ):
         super().__init__()
-        if top_k < 1:
-            raise ValueError("top_k must be >= 1")
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
 
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
         self.num_views = len(self.view_names)
-        self.num_experts = num_experts
-        self.top_k = min(top_k, num_experts)
         self.expert_feature_dim = expert_feature_dim
+        self.num_experts = max(1, int(num_experts))
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
         self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
-        self.gating = ViewGating(
-            in_features=in_features,
-            view_embed_dim=view_embed_dim,
-            num_experts=num_experts,
-            hidden_dim=gate_hidden_dim,
-            num_layers=gate_num_layers,
-            first_omega_0=gate_first_omega_0,
-            hidden_omega_0=gate_hidden_omega_0,
-        )
 
-        self.experts = nn.ModuleList(
-            [
-                ExpertEncoder(
-                    in_features=in_features,
-                    feature_dim=expert_feature_dim,
-                    use_positional_encoding=expert_use_positional_encoding,
-                    num_frequencies=expert_num_frequencies,
-                    hidden_dim=expert_hidden_dim,
-                    num_layers=expert_num_layers,
-                    first_omega_0=expert_first_omega_0,
-                    hidden_omega_0=expert_hidden_omega_0,
-                )
-                for _ in range(num_experts)
-            ]
+        self.shared_encoder = ExpertEncoder(
+            in_features=in_features,
+            feature_dim=expert_feature_dim,
+            use_positional_encoding=expert_use_positional_encoding,
+            num_frequencies=expert_num_frequencies,
+            hidden_dim=expert_hidden_dim,
+            num_layers=expert_num_layers,
+            first_omega_0=expert_first_omega_0,
+            hidden_omega_0=expert_hidden_omega_0,
         )
 
         num_heads = self._resolve_num_heads(expert_feature_dim, fusion_num_heads)
@@ -148,41 +129,23 @@ class BasisExpertsAttention(nn.Module):
                 return candidate
         return 1
 
-    def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
-        _, indices = torch.topk(probs, k=self.top_k, dim=-1)
-        mask = torch.zeros_like(probs)
-        return mask.scatter_(1, indices, 1.0)
-
     def forward(
         self,
         coords: torch.Tensor,
         request: Optional[str] = None,
         *,
-        hard_topk: bool = True,
         return_aux: bool = False,
     ):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
-        expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
+        shared_feat = self.shared_encoder(coords)  # (B, F)
 
-        probs_list: List[torch.Tensor] = []
-        masks_list: List[torch.Tensor] = []
         h_views: List[torch.Tensor] = []
-
         for view_idx, _name in enumerate(self.view_names):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
-            probs, _ = self.gating(coords, view_embed)
-            mask = self._topk_mask(probs)
-            masked_probs = probs * mask
-            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
-            weights = masked_probs if hard_topk else probs
-
-            h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-            h_v = h_v + self.view_embed_proj(view_embed)
-            probs_list.append(probs)
-            masks_list.append(mask)
+            h_v = shared_feat + self.view_embed_proj(view_embed)
             h_views.append(h_v)
 
         h_views_tensor = torch.stack(h_views, dim=1)  # (B, V, F)
@@ -201,9 +164,13 @@ class BasisExpertsAttention(nn.Module):
 
         output = preds if request is None else preds[request]
         if return_aux:
+            bsz = coords.shape[0]
+            probs = torch.zeros(bsz, self.num_views, self.num_experts, device=coords.device)
+            masks = torch.zeros_like(probs)
+            expert_feats = shared_feat.unsqueeze(1).repeat(1, self.num_experts, 1)
             aux = {
-                "probs": torch.stack(probs_list, dim=1),  # (B, V, M)
-                "masks": torch.stack(masks_list, dim=1),  # (B, V, M)
+                "probs": probs,
+                "masks": masks,
                 "H_views": h_views_tensor,
                 "H_views_fused": h_views_fused,
                 "CTX": ctx_out,
@@ -213,7 +180,7 @@ class BasisExpertsAttention(nn.Module):
         return output
 
 
-def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
+def build_baisiExpert_NoMoE_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertNoMoE:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
     base_dim = cfg.get("base_dim")
@@ -222,37 +189,30 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         expert_feature_dim = 8 * base_dim
         view_embed_dim = base_dim
         expert_hidden_dim = 8 * base_dim
-        gate_hidden_dim = 8 * base_dim
         decoder_hidden_dim = 8 * base_dim
     else:
         expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
         view_embed_dim = int(cfg.get("view_embed_dim", 16))
         expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
-        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
         decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
-    return BasisExpertsAttention(
+    return BasisExpertNoMoE(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
-        num_experts=int(cfg.get("num_experts", 7)),
         expert_feature_dim=expert_feature_dim,
-        top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=view_embed_dim,
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
         expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
-        gate_hidden_dim=gate_hidden_dim,
-        gate_num_layers=int(cfg.get("gate_num_layers", 3)),
         decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
-        gate_first_omega_0=float(cfg.get("gate_first_omega_0", 30.0)),
-        gate_hidden_omega_0=float(cfg.get("gate_hidden_omega_0", 30.0)),
         decoder_first_omega_0=float(cfg.get("decoder_first_omega_0", 30.0)),
         decoder_hidden_omega_0=float(cfg.get("decoder_hidden_omega_0", 30.0)),
         fusion_num_layers=int(cfg.get("fusion_num_layers", 2)),
         fusion_num_heads=fusion_num_heads,
         fusion_mlp_ratio=float(cfg.get("fusion_mlp_ratio", 4.0)),
         fusion_dropout=float(cfg.get("fusion_dropout", 0.1)),
+        num_experts=int(cfg.get("num_experts", 1)),
     )

@@ -5,14 +5,14 @@ data:
   dataset_name: xyz_u
   split: train
   data_root: ./data
-  x_path: ./data/raw/xyz_u/train/coords_xyz.npy
-  y_path: ./data/raw/xyz_u/train/targets_u.npy
+  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  y_path: ./data/raw/sukong/train/target_cell_S.npy
   normalize: true
 model:
   name: siren
-  in_features: 3
-  out_features: 3
-  hidden_features: 512
+  in_features: 4
+  out_features: 24
+  hidden_features: 80
   hidden_layers: 5
   first_omega_0: 30.0
   hidden_omega_0: 30.0
@@ -23,8 +23,8 @@ training:
   batch_size: 65536
   pred_batch_size: 65536
   lr: 5.0e-5
-  log_every: 4
-  save_every: 10
+  log_every: 1
+  save_every: 20
   early_stop_patience: 0
   seed: 42
   resume_path: null

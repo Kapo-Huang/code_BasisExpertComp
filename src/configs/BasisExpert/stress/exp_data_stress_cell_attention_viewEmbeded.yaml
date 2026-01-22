@@ -1,5 +1,5 @@
-experiment: exp9_basisExpert_sukong_multiview_xyzt_attention
-exp_id: basisExpert-sukong-multiview-attention
+experiment: exp9_basisExpert_sukong_multiview_xyzt_attention_lightViewEmbed
+exp_id: basisExpert-sukong-multiview-attention-lightViewEmbed
 experiment_root: experiments
 data:
   dataset_name: sukong
@@ -7,22 +7,22 @@ data:
   data_root: ./data
   x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
   attr_paths:
+    target_E: ./data/raw/sukong/train/target_cell_E.npy
     target_E_IntegrationPoints: ./data/raw/sukong/train/target_cell_E_IntegrationPoints.npy
+    target_S: ./data/raw/sukong/train/target_cell_S.npy
     target_S_IntegrationPoints: ./data/raw/sukong/train/target_cell_S_IntegrationPoints.npy
-    targets_E: ./data/raw/sukong/train/targets_cell_E.npy
-    targets_S: ./data/raw/sukong/train/targets_cell_S.npy
   normalize: true
 model:
-  name: basisExperts
+  name: basisexperts_attention_light_viewembed
   in_features: 4
   num_experts: 7
-  base_dim: 10
+  base_dim: 8
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
   expert_num_layers: 2
   gate_num_layers: 3
-  decoder_num_layers: 3
+  decoder_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
   gate_first_omega_0: 30.0
@@ -31,11 +31,11 @@ model:
   decoder_hidden_omega_0: 30.0
   fusion_num_layers: 2
   fusion_num_heads: 4
-  fusion_mlp_ratio: 2.0
+  fusion_mlp_ratio: 1.0
   fusion_dropout: 0.1
 training:
   num_workers: 4
-  epochs: 60
+  epochs: 80
   batch_size: 8192
   pred_batch_size: 8192
   lr: 5.0e-5
