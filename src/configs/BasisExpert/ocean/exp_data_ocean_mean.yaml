@@ -1,5 +1,5 @@
-experiment: exp9_1_basisExpert_ocean_xyzt
-exp_id: basisExpert-ocean-multiview
+experiment: exp9_1_basisExpert_ocean_xyzt_mean
+exp_id: basisExpert-ocean-multiview-mean
 experiment_root: experiments
 data:
   dataset_name: ocean
@@ -14,16 +14,17 @@ data:
     data_Speed_time: ./data/raw/ocean/train/target_Speed_time_sub.npy
   normalize: true
 model:
-  name: basisExperts_attention
+  name: basisExpert_simple_concat
+  fusion_mode: mean
   in_features: 4
   num_experts: 7
   base_dim: 8
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_num_layers: 2
+  expert_num_layers: 3
   gate_num_layers: 3
-  decoder_num_layers: 2
+  decoder_num_layers: 3
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
   gate_first_omega_0: 30.0
@@ -32,18 +33,18 @@ model:
   decoder_hidden_omega_0: 30.0
   fusion_num_layers: 2
   fusion_num_heads: 4
-  fusion_mlp_ratio: 1.0
+  fusion_mlp_ratio: 4.0
   fusion_dropout: 0.1
 training:
   num_workers: 4
   epochs: 60
   batch_size: 8192
   pred_batch_size: 8192
-  lr: 5.0e-5
+  lr: 5.0e-05
   log_every: 1
   save_every: 10
   early_stop_patience: 0
   seed: 42
   loss_type: mse
-  lam_eq: 1.0e-2
-  gam_div: 1.0e-3
+  lam_eq: 0.01
+  gam_div: 0.001

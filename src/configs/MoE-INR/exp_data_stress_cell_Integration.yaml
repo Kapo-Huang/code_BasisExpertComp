@@ -1,19 +1,19 @@
-experiment: exp_moe_inr_xyzt_to_fort63
-exp_id: moeinr-ocean-fort63-sub
+experiment: exp_moe_inr_cell_S_IntegrationPoints
+exp_id: moeinr-cell-S-IntegrationPoints
 experiment_root: experiments
 data:
-  dataset_name: ocean
+  dataset_name: sukong
   split: train
   data_root: ./data
-  x_path: ./data/raw/ocean/train/source_XYZT_sub.npy
-  y_path: ./data/raw/ocean/train/target_fort63_sub.npy
+  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  y_path: ./data/raw/sukong/train/target_cell_S_IntegrationPoints.npy
   normalize: true
 model:
   name: moe_inr
   in_features: 4
-  out_features: 1
+  out_features: 6
   num_experts: 7
-  base_dim: 14
+  base_dim: 4
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
   policy_num_layers: 3

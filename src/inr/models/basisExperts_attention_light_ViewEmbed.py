@@ -83,7 +83,7 @@ class BasisExpertsAttention(nn.Module):
         self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
-        self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
+        # self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
         self.gating = ViewGating(
             in_features=in_features,
             view_embed_dim=view_embed_dim,
@@ -180,7 +180,7 @@ class BasisExpertsAttention(nn.Module):
             weights = masked_probs if hard_topk else probs
 
             h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-            h_v = h_v + self.view_embed_proj(view_embed)
+            # h_v = h_v + self.view_embed_proj(view_embed)
             probs_list.append(probs)
             masks_list.append(mask)
             h_views.append(h_v)
@@ -213,7 +213,7 @@ class BasisExpertsAttention(nn.Module):
         return output
 
 
-def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
+def build_basisExperts_attention_light_viewembed_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
     base_dim = cfg.get("base_dim")

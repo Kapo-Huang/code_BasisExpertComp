@@ -9,7 +9,7 @@ import torch
 from torch.utils.data import DataLoader, Dataset
 
 from inr.data import NodeDataset
-from inr.models.basisExperts import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.models.basisExpert_simple_concat import diversity_loss, load_balance_loss, reconstruction_loss
 from inr.utils.io import load_checkpoint, save_checkpoint
 try:
     from tqdm import tqdm

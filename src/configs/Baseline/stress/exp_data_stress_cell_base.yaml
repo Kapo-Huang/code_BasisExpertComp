@@ -1,0 +1,39 @@
+﻿experiment: exp_baseline_sharedenc_viewadd_stress
+exp_id: baseline-sharedenc-viewadd-stress
+experiment_root: experiments
+data:
+  dataset_name: sukong
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  attr_paths:
+    target_E: ./data/raw/sukong/train/target_cell_E.npy
+    target_E_IntegrationPoints: ./data/raw/sukong/train/target_cell_E_IntegrationPoints.npy
+    target_S: ./data/raw/sukong/train/target_cell_S.npy
+    target_S_IntegrationPoints: ./data/raw/sukong/train/target_cell_S_IntegrationPoints.npy
+  normalize: true
+model:
+  name: base_shared_enc_view_add_shared_dec_trunk
+  in_features: 4
+  base_dim: 14
+  shared_use_positional_encoding: true
+  shared_num_frequencies: 6
+  shared_num_layers: 3
+  decoder_num_layers: 3
+  shared_first_omega_0: 30.0
+  shared_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+training:
+  num_workers: 4
+  epochs: 80
+  batch_size: 8192
+  pred_batch_size: 8192
+  lr: 5.0e-5
+  log_every: 1
+  save_every: 10
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0.0
+  gam_div: 0.0

@@ -5,23 +5,23 @@ data:
   dataset_name: centroids
   split: train
   data_root: ./data
-  x_path: ./data/raw/centroids/train/coords_xyzt.npy
-  y_path: ./data/raw/centroids/train/targets_e_time.npy
+  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  y_path: ./data/raw/sukong/train/target_cell_S.npy
   normalize: true
 model:
   name: coordnet
   in_features: 4
   out_features: 24
-  init_features: 32
-  num_res: 5
+  init_features: 8
+  num_res: 2
 training:
   num_workers: 4
-  epochs: 60
-  batch_size: 65536
-  pred_batch_size: 65536
+  epochs: 80
+  batch_size: 18000
+  pred_batch_size: 18000
   lr: 5.0e-5
   log_every: 1
-  save_every: 5
+  save_every: 10
   early_stop_patience: 0
   seed: 42
   resume_path: null
