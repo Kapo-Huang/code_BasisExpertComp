@@ -6,14 +6,14 @@ data:
   split: train
   data_root: ./data
   x_path: ./data/raw/sukong/train/source_point_XYZT.npy
-  y_path: ./data/raw/sukong/train/target_point_RF.npy
+  y_path: ./data/raw/sukong/train/target_point_U.npy
   normalize: true
 model:
   name: moe_inr
   in_features: 4
   out_features: 3
   num_experts: 7
-  base_dim: 14
+  base_dim: 6
   encoder_first_omega_0: 30.0
   encoder_hidden_omega_0: 30.0
   policy_num_layers: 3

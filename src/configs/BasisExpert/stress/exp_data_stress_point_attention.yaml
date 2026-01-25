@@ -11,16 +11,16 @@ data:
     target_point_U: ./data/raw/sukong/train/target_point_U.npy
   normalize: true
 model:
-  name: basisExperts_attention
+  name: basisexperts_attention_light_viewembed
   in_features: 4
   num_experts: 7
-  base_dim: 8
+  base_dim: 4
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_num_layers: 3
+  expert_num_layers: 2
   gate_num_layers: 3
-  decoder_num_layers: 3
+  decoder_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
   gate_first_omega_0: 30.0
@@ -29,7 +29,7 @@ model:
   decoder_hidden_omega_0: 30.0
   fusion_num_layers: 2
   fusion_num_heads: 4
-  fusion_mlp_ratio: 4.0
+  fusion_mlp_ratio: 1.0
   fusion_dropout: 0.1
 training:
   num_workers: 4
