@@ -16,11 +16,12 @@ from .io_utils import (
 )
 from .metrics import (
     compute_psnr,
+    error_stats,
     hotspot_metrics,
     peak_matching_metrics,
     split_frames,
-    tail_metrics,
     to_scalar,
+    EPS,
 )
 from .plotting import plot_pred_vs_gt, plot_rel_error_series
 
@@ -108,7 +109,7 @@ def validate_experiment(
         print(f"[{exp_dir.name}] Stage: load arrays ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
 
         t_stage = time.perf_counter()
-        psnr_val = compute_psnr(gt, pred)
+        psnr_mean, psnr_min, psnr_per_channel = compute_psnr(gt, pred)
         print(f"[{exp_dir.name}] Stage: compute PSNR ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
 
         t_stage = time.perf_counter()
@@ -119,15 +120,15 @@ def validate_experiment(
         print(f"[{exp_dir.name}] Stage: split series ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
 
         t_stage = time.perf_counter()
-        tail_list = []
+        err_list = []
         hotspot_list = []
         peak_list = []
 
-        for gt_u, pred_u in zip(gt_series, pred_series):
+        for gt_raw, pred_raw, gt_u, pred_u in zip(gt_frames, pred_frames, gt_series, pred_series):
+            err_list.append(error_stats(gt_raw, pred_raw, eps=EPS))
             gt_u = np.asarray(gt_u).reshape(-1)
             pred_u = np.asarray(pred_u).reshape(-1)
 
-            tail_list.append(tail_metrics(gt_u, pred_u, top_percent=tail_percent, topk=tail_topk))
             hotspot_list.append(hotspot_metrics(gt_u, pred_u, tau=hotspot_tau, tau_percentile=hotspot_tau_percentile))
 
             if mesh_points is not None and mesh_points.shape[0] == gt_u.size:
@@ -145,16 +146,24 @@ def validate_experiment(
         metrics = {}
         metrics.update(
             {
-                "tail_percent": float(tail_percent),
-                "tail_count_mean": _agg_mean("tail_count", tail_list),
-                "tail_mae_mean": _agg_mean("tail_mae", tail_list),
-                "tail_mre_mean": _agg_mean("tail_mre", tail_list),
-                "tail_p99_abs_mean": _agg_mean("tail_p99_abs", tail_list),
-                "tail_p999_abs_mean": _agg_mean("tail_p999_abs", tail_list),
-                "tail_p99_rel_mean": _agg_mean("tail_p99_rel", tail_list),
-                "tail_p999_rel_mean": _agg_mean("tail_p999_rel", tail_list),
-                "tail_max_abs_worst": _agg_max("tail_max_abs", tail_list),
-                "tail_max_rel_worst": _agg_max("tail_max_rel", tail_list),
+                "mse_all_mean": _agg_mean("mse_all", err_list),
+                "rmse_all_mean": _agg_mean("rmse_all", err_list),
+                "mae_all_mean": _agg_mean("mae_all", err_list),
+                "mre_all_mean": _agg_mean("mre_all", err_list),
+                "abs_p95_mean": _agg_mean("abs_p95", err_list),
+                "abs_p99_mean": _agg_mean("abs_p99", err_list),
+                "abs_p999_mean": _agg_mean("abs_p999", err_list),
+                "rel_p95_mean": _agg_mean("rel_p95", err_list),
+                "rel_p99_mean": _agg_mean("rel_p99", err_list),
+                "rel_p999_mean": _agg_mean("rel_p999", err_list),
+                "abs_max_worst": _agg_max("abs_max", err_list),
+                "rel_max_worst": _agg_max("rel_max", err_list),
+                "rmse_ch_worst_mean": _agg_mean("rmse_ch_worst", err_list),
+                "mae_ch_worst_mean": _agg_mean("mae_ch_worst", err_list),
+                "mre_ch_worst_mean": _agg_mean("mre_ch_worst", err_list),
+                "rmse_all_worst": _agg_max("rmse_all", err_list),
+                "abs_p99_worst": _agg_max("abs_p99", err_list),
+                "rel_p99_worst": _agg_max("rel_p99", err_list),
             }
         )
 
@@ -163,7 +172,6 @@ def validate_experiment(
                 "hotspot_tau_percentile": float(hotspot_tau_percentile) if hotspot_tau_percentile is not None else "",
                 "hotspot_tau_mean": _agg_mean("hotspot_tau", hotspot_list),
                 "hotspot_iou_mean": _agg_mean("hotspot_iou", hotspot_list),
-                "hotspot_dice_mean": _agg_mean("hotspot_dice", hotspot_list),
                 "hotspot_gt_count_mean": _agg_mean("hotspot_gt_count", hotspot_list),
                 "hotspot_pred_count_mean": _agg_mean("hotspot_pred_count", hotspot_list),
             }
@@ -174,9 +182,7 @@ def validate_experiment(
                 {
                     "peak_topk": int(peak_topk),
                     "peak_match_radius_mean": _agg_mean("peak_match_radius", peak_list),
-                    "peak_nn_mean": _agg_mean("peak_nn_mean", peak_list),
                     "peak_nn_median_mean": _agg_mean("peak_nn_median", peak_list),
-                    "peak_nn_max_worst": _agg_max("peak_nn_max", peak_list),
                     "peak_recall_mean": _agg_mean("peak_recall", peak_list),
                 }
             )
@@ -185,9 +191,7 @@ def validate_experiment(
                 {
                     "peak_topk": int(peak_topk),
                     "peak_match_radius_mean": "",
-                    "peak_nn_mean": "",
                     "peak_nn_median_mean": "",
-                    "peak_nn_max_worst": "",
                     "peak_recall_mean": "",
                 }
             )
@@ -228,7 +232,9 @@ def validate_experiment(
             "pred_file": str(pred_path),
             "ckpt_file": str(ckpt_path) if ckpt_path is not None else "",
             "params": param_count if param_count is not None else "",
-            "psnr": psnr_val,
+            "psnr_mean": psnr_mean,
+            "psnr_min": psnr_min,
+            "psnr_p10": float(np.percentile(psnr_per_channel, 10)) if psnr_per_channel.size else float("nan"),
             "cr": cr if cr is not None else "",
             "model_size_bytes": model_size if model_size is not None else "",
             "db_size_bytes": db_size,

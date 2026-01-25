@@ -7,18 +7,124 @@ from skimage.metrics import peak_signal_noise_ratio as skimage_psnr
 EPS = 1e-12
 
 
+def _reshape_channels(arr: np.ndarray) -> np.ndarray:
+    a = np.asarray(arr, dtype=np.float64)
+    if a.ndim == 0:
+        return a.reshape(1, 1)
+    if a.ndim == 1:
+        return a.reshape(-1, 1)
+    return a.reshape(-1, a.shape[-1])
+
+
 def compute_psnr(gt, pred):
     gt_f = np.asarray(gt, dtype=np.float64)
     pred_f = np.asarray(pred, dtype=np.float64)
-    mse = float(np.mean((gt_f - pred_f) ** 2))
-    data_range = float(np.max(gt_f) - np.min(gt_f))
-    if data_range <= 0:
-        data_range = float(np.max(np.abs(gt_f))) + EPS
-    if skimage_psnr is not None:
-        return float(skimage_psnr(gt_f, pred_f, data_range=data_range))
-    if mse <= 0:
-        return float("inf")
-    return 10.0 * math.log10((data_range ** 2) / (mse + EPS))
+    if gt_f.shape != pred_f.shape:
+        raise ValueError(f"compute_psnr: gt/pred shape mismatch {gt_f.shape} vs {pred_f.shape}")
+
+    gt_c = _reshape_channels(gt_f)
+    pred_c = _reshape_channels(pred_f)
+    psnr_per_channel = []
+
+    for c in range(gt_c.shape[1]):
+        g = gt_c[:, c]
+        p = pred_c[:, c]
+        mse = float(np.mean((g - p) ** 2))
+        lo = float(np.percentile(g, 1))
+        hi = float(np.percentile(g, 99))
+        data_range = hi - lo
+        if data_range <= 0:
+            data_range = float(np.max(np.abs(g))) + EPS
+        if data_range <= 0:
+            data_range = 1.0
+
+        if mse <= 0:
+            psnr_c = float("inf")
+        elif skimage_psnr is not None:
+            psnr_c = float(skimage_psnr(g, p, data_range=data_range))
+        else:
+            psnr_c = 10.0 * math.log10((data_range**2) / (mse + EPS))
+        psnr_per_channel.append(psnr_c)
+
+    psnr_per_channel = np.asarray(psnr_per_channel, dtype=np.float64)
+    psnr_mean = float(np.mean(psnr_per_channel))
+    psnr_min = float(np.min(psnr_per_channel))
+    return psnr_mean, psnr_min, psnr_per_channel
+
+
+def error_stats(gt_u, pred_u, eps: float = EPS, percentiles: Optional[List[float]] = None):
+    if percentiles is None:
+        percentiles = [95, 99, 99.9]
+
+    gt_f = np.asarray(gt_u, dtype=np.float64)
+    pred_f = np.asarray(pred_u, dtype=np.float64)
+    if gt_f.shape != pred_f.shape:
+        raise ValueError(f"error_stats: gt/pred shape mismatch {gt_f.shape} vs {pred_f.shape}")
+
+    gt_c = _reshape_channels(gt_f)
+    pred_c = _reshape_channels(pred_f)
+
+    err = pred_c - gt_c
+    abs_err = np.abs(err)
+    rel_err = abs_err / (np.abs(gt_c) + eps)
+
+    mse_all = float(np.mean(err**2)) if err.size else float("nan")
+    rmse_all = float(np.sqrt(mse_all)) if err.size else float("nan")
+    mae_all = float(np.mean(abs_err)) if abs_err.size else float("nan")
+    mre_all = float(np.mean(rel_err)) if rel_err.size else float("nan")
+
+    abs_flat = abs_err.reshape(-1)
+    rel_flat = rel_err.reshape(-1)
+
+    def _pkey(p: float) -> str:
+        if float(p).is_integer():
+            return f"p{int(p)}"
+        return f"p{str(p).replace('.', '')}"
+
+    stats = {
+        "mse_all": mse_all,
+        "rmse_all": rmse_all,
+        "mae_all": mae_all,
+        "mre_all": mre_all,
+        "abs_max": float(np.nanmax(abs_flat)) if abs_flat.size else float("nan"),
+        "rel_max": float(np.nanmax(rel_flat)) if rel_flat.size else float("nan"),
+    }
+
+    if abs_flat.size:
+        abs_p = np.nanpercentile(abs_flat, percentiles)
+    else:
+        abs_p = [float("nan")] * len(percentiles)
+    if rel_flat.size:
+        rel_p = np.nanpercentile(rel_flat, percentiles)
+    else:
+        rel_p = [float("nan")] * len(percentiles)
+
+    for p, v in zip(percentiles, abs_p):
+        stats[f"abs_{_pkey(p)}"] = float(v)
+    for p, v in zip(percentiles, rel_p):
+        stats[f"rel_{_pkey(p)}"] = float(v)
+
+    if err.size:
+        rmse_ch = np.sqrt(np.mean(err**2, axis=0))
+        mae_ch = np.mean(abs_err, axis=0)
+        mre_ch = np.mean(rel_err, axis=0)
+        stats.update(
+            {
+                "rmse_ch_worst": float(np.nanmax(rmse_ch)),
+                "mae_ch_worst": float(np.nanmax(mae_ch)),
+                "mre_ch_worst": float(np.nanmax(mre_ch)),
+            }
+        )
+    else:
+        stats.update(
+            {
+                "rmse_ch_worst": float("nan"),
+                "mae_ch_worst": float("nan"),
+                "mre_ch_worst": float("nan"),
+            }
+        )
+
+    return stats
 
 
 def to_scalar(u):
