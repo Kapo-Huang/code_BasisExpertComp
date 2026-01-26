@@ -59,6 +59,11 @@ def build_model(model_cfg, dataset=None):
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts_attention_light_ViewEmbed requires a MultiViewCoordDataset with view_specs().")
         return build_basisExperts_attention_light_viewembed_from_config(model_cfg, dataset.view_specs())
+    if name in {"lightbasisexpert", "light_basis_expert", "light_basis_expert_pe"}:
+        from inr.models.LightBasisExpert import build_light_basis_expert_from_config
+        if dataset is None or not hasattr(dataset, "view_specs"):
+            raise ValueError("LightBasisExpert requires a MultiViewCoordDataset with view_specs().")
+        return build_light_basis_expert_from_config(model_cfg, dataset.view_specs())
     if name in {"stsr_inr", "stsrinr", "stsr-inr"}:
         from inr.models.STSR_inr import (
             build_stsr_inr_from_config,
