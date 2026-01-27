@@ -1,10 +1,9 @@
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Tuple
 
 import torch
 import torch.nn as nn
 
-from .BaseSharedEncViewAddSharedDecTrunk import SharedEncoder
-from .moe_inr import SirenMLP
+from .components import ExpertEncoder, SirenMLP, ViewGating, PositionalEncoding
 
 
 class TinyTransformerFusion(nn.Module):
@@ -38,29 +37,30 @@ class TinyTransformerFusion(nn.Module):
         return self.encoder(tokens)
 
 
-class BaseSharedEncViewAttentionFusedDecTrunk(nn.Module):
+class BasisExpertsAttentionLightPE(nn.Module):
     """
-    Shared-encoder baseline with attention fusion:
-    - shared encoder maps coords -> h
-    - per-view embedding added to h
-    - tiny transformer fuses view tokens with a context token
-    - per-view decoders take [fused_view, ctx] as input
+    MoE-INR with cross-view transformer fusion and fixed decoder input size.
     """
 
     def __init__(
         self,
         in_features: int,
         view_specs: Dict[str, int],
-        shared_feature_dim: int = 128,
+        num_experts: int = 7,
+        expert_feature_dim: int = 128,
+        top_k: int = 2,
         view_embed_dim: int = 16,
-        shared_use_positional_encoding: bool = True,
-        shared_num_frequencies: int = 6,
-        shared_hidden_dim: int = 128,
-        shared_num_layers: int = 3,
+        expert_num_frequencies: int = 6,
+        expert_hidden_dim: int = 128,
+        expert_num_layers: int = 3,
+        gate_hidden_dim: int = 128,
+        gate_num_layers: int = 3,
         decoder_hidden_dim: int = 128,
         decoder_num_layers: int = 3,
-        shared_first_omega_0: float = 30.0,
-        shared_hidden_omega_0: float = 30.0,
+        expert_first_omega_0: float = 30.0,
+        expert_hidden_omega_0: float = 30.0,
+        gate_first_omega_0: float = 30.0,
+        gate_hidden_omega_0: float = 30.0,
         decoder_first_omega_0: float = 30.0,
         decoder_hidden_omega_0: float = 30.0,
         fusion_num_layers: int = 2,
@@ -69,39 +69,64 @@ class BaseSharedEncViewAttentionFusedDecTrunk(nn.Module):
         fusion_dropout: float = 0.1,
     ):
         super().__init__()
+        if top_k < 1:
+            raise ValueError("top_k must be >= 1")
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
 
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
         self.num_views = len(self.view_names)
+        self.num_experts = num_experts
+        self.top_k = min(top_k, num_experts)
+        self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
-        self.view_embed_proj = nn.Linear(view_embed_dim, shared_feature_dim, bias=False)
-
-        self.shared_encoder = SharedEncoder(
+        self.pos_enc = PositionalEncoding(
             in_features=in_features,
-            feature_dim=shared_feature_dim,
-            use_positional_encoding=shared_use_positional_encoding,
-            num_frequencies=shared_num_frequencies,
-            hidden_dim=shared_hidden_dim,
-            num_layers=shared_num_layers,
-            first_omega_0=shared_first_omega_0,
-            hidden_omega_0=shared_hidden_omega_0,
+            num_frequencies=expert_num_frequencies,
+            include_input=True,
+        )
+        pe_dim = self.pos_enc.out_dim
+        # self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
+        self.gating = ViewGating(
+            in_features=pe_dim,
+            view_embed_dim=view_embed_dim,
+            num_experts=num_experts,
+            hidden_dim=gate_hidden_dim,
+            num_layers=gate_num_layers,
+            first_omega_0=gate_first_omega_0,
+            hidden_omega_0=gate_hidden_omega_0,
         )
 
-        num_heads = self._resolve_num_heads(shared_feature_dim, fusion_num_heads)
-        self.ctx_token = nn.Parameter(torch.zeros(1, 1, shared_feature_dim))
+        self.experts = nn.ModuleList(
+            [
+                ExpertEncoder(
+                    in_features=pe_dim,
+                    feature_dim=expert_feature_dim,
+                    use_positional_encoding=False,
+                    num_frequencies=expert_num_frequencies,
+                    hidden_dim=expert_hidden_dim,
+                    num_layers=expert_num_layers,
+                    first_omega_0=expert_first_omega_0,
+                    hidden_omega_0=expert_hidden_omega_0,
+                )
+                for _ in range(num_experts)
+            ]
+        )
+
+        num_heads = self._resolve_num_heads(expert_feature_dim, fusion_num_heads)
+        self.ctx_token = nn.Parameter(torch.zeros(1, 1, expert_feature_dim))
         nn.init.normal_(self.ctx_token, std=0.02)
         self.fusion = TinyTransformerFusion(
-            feature_dim=shared_feature_dim,
+            feature_dim=expert_feature_dim,
             num_layers=fusion_num_layers,
             num_heads=num_heads,
             mlp_ratio=fusion_mlp_ratio,
             dropout=fusion_dropout,
         )
 
-        fused_dim = shared_feature_dim * 2
+        fused_dim = expert_feature_dim * 2
         self.decoders = nn.ModuleDict(
             {
                 name: SirenMLP(
@@ -120,7 +145,7 @@ class BaseSharedEncViewAttentionFusedDecTrunk(nn.Module):
     def _resolve_num_heads(feature_dim: int, requested: Optional[int]) -> int:
         if requested is not None:
             if feature_dim % requested != 0:
-                raise ValueError("fusion_num_heads must divide shared_feature_dim")
+                raise ValueError("fusion_num_heads must divide expert_feature_dim")
             return requested
         preferred = 8 if feature_dim >= 256 else 4
         for candidate in (preferred, 4, 2, 1, 8):
@@ -128,24 +153,43 @@ class BaseSharedEncViewAttentionFusedDecTrunk(nn.Module):
                 return candidate
         return 1
 
+    def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
+        _, indices = torch.topk(probs, k=self.top_k, dim=-1)
+        mask = torch.zeros_like(probs)
+        return mask.scatter_(1, indices, 1.0)
+
     def forward(
         self,
         coords: torch.Tensor,
         request: Optional[str] = None,
         *,
+        hard_topk: bool = True,
         return_aux: bool = False,
     ):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
+        
+        x_pe = self.pos_enc(coords)
+        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
 
-        shared_feat = self.shared_encoder(coords)  # (B, F)
-
+        probs_list: List[torch.Tensor] = []
+        masks_list: List[torch.Tensor] = []
         h_views: List[torch.Tensor] = []
+
         for view_idx, _name in enumerate(self.view_names):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
-            h_view = shared_feat + self.view_embed_proj(view_embed)
-            h_views.append(h_view)
+            probs, _ = self.gating(x_pe, view_embed)
+            mask = self._topk_mask(probs)
+            masked_probs = probs * mask
+            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
+            weights = masked_probs if hard_topk else probs
+
+            h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
+            # h_v = h_v + self.view_embed_proj(view_embed)
+            probs_list.append(probs)
+            masks_list.append(mask)
+            h_views.append(h_v)
 
         h_views_tensor = torch.stack(h_views, dim=1)  # (B, V, F)
         ctx = self.ctx_token.expand(coords.shape[0], -1, -1)
@@ -164,45 +208,54 @@ class BaseSharedEncViewAttentionFusedDecTrunk(nn.Module):
         output = preds if request is None else preds[request]
         if return_aux:
             aux = {
+                "probs": torch.stack(probs_list, dim=1),  # (B, V, M)
+                "masks": torch.stack(masks_list, dim=1),  # (B, V, M)
                 "H_views": h_views_tensor,
                 "H_views_fused": h_views_fused,
                 "CTX": ctx_out,
-                "shared_feat": shared_feat,
+                "expert_feats": expert_feats,
             }
             return output, aux
         return output
 
 
-def build_base_shared_enc_view_attention_fused_dec_trunk_from_config(
+def build_basisExperts_attention_light_pe_from_config(
     cfg: Dict, view_specs: Dict[str, int]
-) -> BaseSharedEncViewAttentionFusedDecTrunk:
+) -> BasisExpertsAttentionLightPE:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
     base_dim = cfg.get("base_dim")
     if base_dim is not None:
         base_dim = int(base_dim)
-        shared_feature_dim = 8 * base_dim
+        expert_feature_dim = 8 * base_dim
         view_embed_dim = base_dim
-        shared_hidden_dim = 8 * base_dim
+        expert_hidden_dim = 8 * base_dim
+        gate_hidden_dim = 8 * base_dim
         decoder_hidden_dim = 8 * base_dim
     else:
-        shared_feature_dim = int(cfg.get("shared_feature_dim", 128))
+        expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
         view_embed_dim = int(cfg.get("view_embed_dim", 16))
-        shared_hidden_dim = int(cfg.get("shared_hidden_dim", 128))
+        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
+        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
         decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
-    return BaseSharedEncViewAttentionFusedDecTrunk(
+    return BasisExpertsAttentionLightPE(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
-        shared_feature_dim=shared_feature_dim,
+        num_experts=int(cfg.get("num_experts", 7)),
+        expert_feature_dim=expert_feature_dim,
+        top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=view_embed_dim,
-        shared_use_positional_encoding=bool(cfg.get("shared_use_positional_encoding", True)),
-        shared_num_frequencies=int(cfg.get("shared_num_frequencies", 6)),
-        shared_hidden_dim=shared_hidden_dim,
-        shared_num_layers=int(cfg.get("shared_num_layers", 3)),
+        expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
+        expert_hidden_dim=expert_hidden_dim,
+        expert_num_layers=int(cfg.get("expert_num_layers", 3)),
+        gate_hidden_dim=gate_hidden_dim,
+        gate_num_layers=int(cfg.get("gate_num_layers", 3)),
         decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
-        shared_first_omega_0=float(cfg.get("shared_first_omega_0", 30.0)),
-        shared_hidden_omega_0=float(cfg.get("shared_hidden_omega_0", 30.0)),
+        expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
+        expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
+        gate_first_omega_0=float(cfg.get("gate_first_omega_0", 30.0)),
+        gate_hidden_omega_0=float(cfg.get("gate_hidden_omega_0", 30.0)),
         decoder_first_omega_0=float(cfg.get("decoder_first_omega_0", 30.0)),
         decoder_hidden_omega_0=float(cfg.get("decoder_hidden_omega_0", 30.0)),
         fusion_num_layers=int(cfg.get("fusion_num_layers", 2)),

@@ -4,7 +4,7 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from .moe_inr import SirenMLP
+from ..sota.moe_inr import SirenMLP
 
 
 class PositionalEncoding(nn.Module):
