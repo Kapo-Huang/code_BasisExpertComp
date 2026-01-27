@@ -1,13 +1,10 @@
 import argparse
 import yaml
 from pathlib import Path
-from inr.data import NodeDataset
-from inr.models.moe_inr import build_moe_inr_from_config
-from inr.models.basisExpert_simple_concat import (
-    MultiViewCoordDataset,
-    build_basisExpert_simple_concat_from_config,
-)
-from inr.models.siren import build_siren_from_config
+from inr.data import NodeDataset, MultiViewCoordDataset
+from inr.models.sota.moe_inr import build_moe_inr_from_config
+from inr.models.basis_expert.simple import build_basisExpert_simple_concat_from_config
+from inr.models.sota.siren import build_siren_from_config
 from inr.training.loops import TrainingConfig, train_model
 
 def parse_args():
@@ -41,31 +38,31 @@ def build_model(model_cfg, dataset=None):
             raise ValueError("baisiExpert_NoMoE requires a MultiViewCoordDataset with view_specs().")
         return build_baisiExpert_NoMoE_from_config(model_cfg, dataset.view_specs())
     if name in {"basisexperts_attention"}:
-        from inr.models.basisExperts_attention import build_basisExperts_attention_from_config
+        from inr.models.basis_expert.experts_attention import build_basisExperts_attention_from_config
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts_attention requires a MultiViewCoordDataset with view_specs().")
         return build_basisExperts_attention_from_config(model_cfg, dataset.view_specs())
     if name in {"basisexperts_attention_light_pe", "basisexperts_attention_lightpe"}:
-        from inr.models.basisExperts_attention_light_PE import (
+        from inr.models.basis_expert.experts_attention_light_pe import (
             build_basisExperts_attention_light_pe_from_config,
         )
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts_attention_light_PE requires a MultiViewCoordDataset with view_specs().")
         return build_basisExperts_attention_light_pe_from_config(model_cfg, dataset.view_specs())
     if name in {"basisexperts_attention_light_viewembed"}:
-        from inr.models.basisExperts_attention_light_ViewEmbed import (
+        from inr.models.basis_expert.experts_attention_light_viewembed import (
             build_basisExperts_attention_light_viewembed_from_config,
         )
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts_attention_light_ViewEmbed requires a MultiViewCoordDataset with view_specs().")
         return build_basisExperts_attention_light_viewembed_from_config(model_cfg, dataset.view_specs())
     if name in {"lightbasisexpert", "light_basis_expert", "light_basis_expert_pe"}:
-        from inr.models.LightBasisExpert import build_light_basis_expert_from_config
+        from inr.models.basis_expert.light_basis_expert import build_light_basis_expert_from_config
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("LightBasisExpert requires a MultiViewCoordDataset with view_specs().")
         return build_light_basis_expert_from_config(model_cfg, dataset.view_specs())
     if name in {"stsr_inr", "stsrinr", "stsr-inr"}:
-        from inr.models.STSR_inr import (
+        from inr.models.sota.stsr_inr import (
             build_stsr_inr_from_config,
             build_stsr_inr_multiview_from_config,
         )
@@ -77,7 +74,7 @@ def build_model(model_cfg, dataset=None):
         "base_shared_enc_view_add_shared_dec_trunk",
         "sharedenc_viewadd",
     }:
-        from inr.models.BaseSharedEncViewAddSharedDecTrunk import (
+        from inr.models.baseline.base_shared_enc_view_add_shared_dec_trunk import (
             build_base_shared_enc_view_add_shared_dec_trunk_from_config,
         )
         if dataset is None or not hasattr(dataset, "view_specs"):
@@ -92,7 +89,7 @@ def build_model(model_cfg, dataset=None):
         "base_shared_enc_view_attention_fused_dec_trunk",
         "sharedenc_viewattn",
     }:
-        from inr.models.BaseSharedEncViewAttentionFusedDecTrunk import (
+        from inr.models.baseline.base_shared_enc_view_attention_fused_dec_trunk import (
             build_base_shared_enc_view_attention_fused_dec_trunk_from_config,
         )
         if dataset is None or not hasattr(dataset, "view_specs"):
@@ -107,7 +104,7 @@ def build_model(model_cfg, dataset=None):
         "base_moe_enc_view_add_dec_trunk",
         "moeenc_viewadd",
     }:
-        from inr.models.BaseMoEEncViewAddDecTrunk import (
+        from inr.models.baseline.base_moe_enc_view_add_dec_trunk import (
             build_base_moe_enc_view_add_dec_trunk_from_config,
         )
         if dataset is None or not hasattr(dataset, "view_specs"):
@@ -118,7 +115,7 @@ def build_model(model_cfg, dataset=None):
             model_cfg, dataset.view_specs()
         )
     if name == "coordnet":
-        from inr.models.CoordNet import build_coordnet_from_config
+        from inr.models.sota.coordnet import build_coordnet_from_config
         return build_coordnet_from_config(model_cfg)
     raise ValueError(f"Unknown model name: {name}")
 
