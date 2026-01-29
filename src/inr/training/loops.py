@@ -6,6 +6,7 @@ from typing import Optional, Tuple
 
 import numpy as np
 import torch
+import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, Subset
 
 from inr.datasets.volumetric import (
@@ -14,13 +15,25 @@ from inr.datasets.volumetric import (
     make_multitarget_collate,
     make_singletarget_collate,
 )
-from inr.models.basisExperts import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.models.basisExpert_simple_concat import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.pretrain.voxel_clustering import compute_voxel_cluster_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
 try:
     from tqdm import tqdm
 except Exception:
     tqdm = None
+
+
+@dataclass
+class PretrainConfig:
+    enabled: bool = False
+    epochs: int = 0
+    lr: float = 5e-5
+    batch_size: int = 8000
+    cluster_num_time_samples: int = 16
+    cluster_seed: int = 42
+    assignments_cache_path: str = ""
 
 
 @dataclass
@@ -44,6 +57,7 @@ class TrainingConfig:
     lam_eq: float = 0.0
     gam_div: float = 0.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
+    pretrain: PretrainConfig = field(default_factory=PretrainConfig)
 
 
 def _unpack_batch(batch):
@@ -93,6 +107,117 @@ def _resolve_collate(ds: Dataset):
     return None
 
 
+def _resolve_base_dataset(ds: Dataset):
+    return ds.dataset if isinstance(ds, Subset) else ds
+
+
+def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: np.ndarray) -> DataLoader:
+    base_ds = _resolve_base_dataset(dataset)
+    if isinstance(base_ds, MultiTargetVolumetricDataset):
+        collate_fn = make_multitarget_collate(
+            base_ds,
+            assignments=assignments,
+            return_expert_id=True,
+            read_targets=False,
+        )
+    elif isinstance(base_ds, VolumetricDataset):
+        collate_fn = make_singletarget_collate(
+            base_ds,
+            assignments=assignments,
+            return_expert_id=True,
+            read_targets=False,
+        )
+    else:
+        raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
+
+    pretrain_kwargs = {
+        "pin_memory": True,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.num_workers > 0,
+        "collate_fn": collate_fn,
+    }
+    if cfg.num_workers > 0:
+        pretrain_kwargs["prefetch_factor"] = 4
+    return DataLoader(
+        dataset,
+        batch_size=cfg.pretrain.batch_size,
+        shuffle=True,
+        **pretrain_kwargs,
+    )
+
+
+def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig, device: torch.device):
+    if not cfg.pretrain.enabled or cfg.pretrain.epochs <= 0:
+        return
+    if cfg.pretrain.batch_size <= 0:
+        raise ValueError("pretrain.batch_size must be positive")
+    if cfg.pretrain.cluster_num_time_samples <= 0:
+        raise ValueError("pretrain.cluster_num_time_samples must be positive")
+    if not (hasattr(model, "encoder") and hasattr(model, "policy") and hasattr(model, "experts")):
+        raise ValueError("Pretrain requires model.encoder, model.policy, and model.experts")
+    num_experts = getattr(model, "num_experts", None)
+    if num_experts is None:
+        raise ValueError("Pretrain requires model.num_experts")
+
+    base_ds = _resolve_base_dataset(dataset)
+    assignments = compute_voxel_cluster_assignments(
+        base_ds,
+        num_experts=int(num_experts),
+        num_time_samples=int(cfg.pretrain.cluster_num_time_samples),
+        seed=int(cfg.pretrain.cluster_seed),
+        cache_path=cfg.pretrain.assignments_cache_path or None,
+    )
+    pretrain_loader = _build_pretrain_loader(dataset, cfg, assignments)
+
+    expert_flags = [p.requires_grad for p in model.experts.parameters()]
+    for p in model.experts.parameters():
+        p.requires_grad = False
+
+    opt = torch.optim.Adam(
+        list(model.encoder.parameters()) + list(model.policy.parameters()),
+        lr=cfg.pretrain.lr,
+        betas=(0.9, 0.999),
+    )
+
+    start_time = time.time()
+    for epoch in range(1, cfg.pretrain.epochs + 1):
+        model.train()
+        epoch_loss = 0.0
+        correct = 0
+        total = 0
+        counts = torch.zeros(int(num_experts), dtype=torch.long)
+        iterator = pretrain_loader
+        if tqdm is not None:
+            iterator = tqdm(pretrain_loader, desc=f"pretrain {epoch}/{cfg.pretrain.epochs}", leave=False)
+        for xb, expert_id in iterator:
+            xb = xb.to(device)
+            expert_id = expert_id.to(device)
+            enc_feat = model.encoder(xb)
+            _, logits, _ = model.policy(xb, enc_feat)
+            loss = F.cross_entropy(logits, expert_id)
+            opt.zero_grad()
+            loss.backward()
+            opt.step()
+
+            epoch_loss += loss.item() * xb.shape[0]
+            preds = torch.argmax(logits, dim=-1)
+            correct += (preds == expert_id).sum().item()
+            total += int(expert_id.numel())
+            counts += torch.bincount(preds.detach().cpu(), minlength=int(num_experts))
+
+        epoch_loss /= max(total, 1)
+        acc = correct / max(total, 1)
+        elapsed = time.time() - start_time
+        print(
+            f"Pretrain epoch {epoch}/{cfg.pretrain.epochs} "
+            f"loss={epoch_loss:.6e} acc={acc:.4f} "
+            f"counts={counts.tolist()} time={elapsed:.1f}s"
+        )
+
+    for p, flag in zip(model.experts.parameters(), expert_flags):
+        p.requires_grad = flag
+
+
 def build_dataloaders(
     dataset: Dataset, cfg: TrainingConfig
 ) -> Tuple[DataLoader, Optional[DataLoader], Dataset, Optional[Dataset]]:
@@ -111,7 +236,7 @@ def build_dataloaders(
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
-        shuffle=False,
+        shuffle=True,
         **train_kwargs,
     )
     val_loader = None
@@ -159,6 +284,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     )
 
     model = model.to(device)
+    _maybe_run_pretrain(model, dataset, cfg, device)
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
     if cfg.loss_type == "l1":
         criterion = torch.nn.L1Loss()

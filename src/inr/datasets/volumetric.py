@@ -256,7 +256,13 @@ class MultiTargetVolumetricDataset(Dataset):
         return state
 
 
-def _singletarget_collate(indices: List[int], dataset: VolumetricDataset):
+def _singletarget_collate(
+    indices: List[int],
+    dataset: VolumetricDataset,
+    assignments: Optional[np.ndarray] = None,
+    return_expert_id: bool = False,
+    read_targets: bool = True,
+):
     idx = np.asarray(indices, dtype=np.int64)
     X = int(dataset.volume_shape.X)
     Y = int(dataset.volume_shape.Y)
@@ -271,6 +277,21 @@ def _singletarget_collate(indices: List[int], dataset: VolumetricDataset):
     xb = torch.from_numpy(coords)
     if dataset.normalize_inputs:
         xb = (xb - dataset._x_mean_s) / dataset._x_std_s
+    xb = xb.to(torch.float32)
+
+    expert_id = None
+    if return_expert_id:
+        if assignments is None:
+            raise ValueError("assignments must be provided when return_expert_id=True")
+        V = X * Y * Z
+        assert assignments.shape == (V,)
+        v = x + X * (y + Y * z)
+        expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+
+    if not read_targets:
+        if return_expert_id:
+            return xb, expert_id
+        return xb
 
     y_flat = dataset._y_flat if dataset._y_flat is not None else dataset._ensure_y_flat()
     block = np.asarray(y_flat[idx], dtype=np.float32)
@@ -281,10 +302,16 @@ def _singletarget_collate(indices: List[int], dataset: VolumetricDataset):
         dataset._ensure_target_stats()
         yb = (yb - dataset.y_mean.squeeze(0)) / dataset.y_std.squeeze(0)
 
-    return xb.to(torch.float32), yb.to(torch.float32)
+    return xb, yb.to(torch.float32)
 
 
-def _multitarget_collate(indices: List[int], dataset: MultiTargetVolumetricDataset):
+def _multitarget_collate(
+    indices: List[int],
+    dataset: MultiTargetVolumetricDataset,
+    assignments: Optional[np.ndarray] = None,
+    return_expert_id: bool = False,
+    read_targets: bool = True,
+):
     idx = np.asarray(indices, dtype=np.int64)
     X = int(dataset.volume_shape.X)
     Y = int(dataset.volume_shape.Y)
@@ -299,6 +326,21 @@ def _multitarget_collate(indices: List[int], dataset: MultiTargetVolumetricDatas
     xb = torch.from_numpy(coords)
     if dataset.normalize_inputs:
         xb = (xb - dataset._x_mean_s) / dataset._x_std_s
+    xb = xb.to(torch.float32)
+
+    expert_id = None
+    if return_expert_id:
+        if assignments is None:
+            raise ValueError("assignments must be provided when return_expert_id=True")
+        V = X * Y * Z
+        assert assignments.shape == (V,)
+        v = x + X * (y + Y * z)
+        expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+
+    if not read_targets:
+        if return_expert_id:
+            return xb, expert_id
+        return xb
 
     targets_flat = dataset._targets_flat if dataset._targets_flat is not None else dataset._ensure_targets_flat()
     yb = {}
@@ -313,16 +355,55 @@ def _multitarget_collate(indices: List[int], dataset: MultiTargetVolumetricDatas
             target = (target - dataset._y_mean_s[name]) / dataset._y_std_s[name]
         yb[name] = target
 
-    xb = xb.to(torch.float32)
     yb = {name: tensor.to(torch.float32) for name, tensor in yb.items()}
     return xb, yb
 
 
-def make_singletarget_collate(dataset: VolumetricDataset) -> Callable[[List[int]], tuple]:
-    dataset._ensure_y_flat()
-    return partial(_singletarget_collate, dataset=dataset)
+def make_singletarget_collate(
+    dataset: VolumetricDataset,
+    assignments: Optional[np.ndarray] = None,
+    return_expert_id: bool = False,
+    read_targets: bool = True,
+) -> Callable[[List[int]], tuple]:
+    if read_targets:
+        dataset._ensure_y_flat()
+    if return_expert_id:
+        X = int(dataset.volume_shape.X)
+        Y = int(dataset.volume_shape.Y)
+        Z = int(dataset.volume_shape.Z)
+        V = X * Y * Z
+        if assignments is None:
+            raise ValueError("assignments must be provided when return_expert_id=True")
+        assert assignments.shape == (V,)
+    return partial(
+        _singletarget_collate,
+        dataset=dataset,
+        assignments=assignments,
+        return_expert_id=return_expert_id,
+        read_targets=read_targets,
+    )
 
 
-def make_multitarget_collate(dataset: MultiTargetVolumetricDataset) -> Callable[[List[int]], tuple]:
-    dataset._ensure_targets_flat()
-    return partial(_multitarget_collate, dataset=dataset)
+def make_multitarget_collate(
+    dataset: MultiTargetVolumetricDataset,
+    assignments: Optional[np.ndarray] = None,
+    return_expert_id: bool = False,
+    read_targets: bool = True,
+) -> Callable[[List[int]], tuple]:
+    if read_targets:
+        dataset._ensure_targets_flat()
+    if return_expert_id:
+        X = int(dataset.volume_shape.X)
+        Y = int(dataset.volume_shape.Y)
+        Z = int(dataset.volume_shape.Z)
+        V = X * Y * Z
+        if assignments is None:
+            raise ValueError("assignments must be provided when return_expert_id=True")
+        assert assignments.shape == (V,)
+    return partial(
+        _multitarget_collate,
+        dataset=dataset,
+        assignments=assignments,
+        return_expert_id=return_expert_id,
+        read_targets=read_targets,
+    )

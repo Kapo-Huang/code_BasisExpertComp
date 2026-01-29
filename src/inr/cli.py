@@ -11,9 +11,9 @@ from inr.data import (
 )
 from inr.datasets.base import compute_target_stats_streaming
 from inr.models.moe_inr import build_moe_inr_from_config
-from inr.models.basisExperts import build_basisExperts_from_config
+from inr.models.basisExpert_simple_concat import build_basisExpert_simple_concat_from_config
 from inr.models.siren import build_siren_from_config
-from inr.training.loops import TrainingConfig, train_model
+from inr.training.loops import PretrainConfig, TrainingConfig, train_model
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train Implicit Neural Representations (SIREN variants)")
@@ -34,7 +34,7 @@ def build_model(model_cfg, dataset=None):
     if name in {"basisexperts", "basis_experts", "basis-experts"}:
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("basisExperts requires a MultiTargetVolumetricDataset with view_specs().")
-        return build_basisExperts_from_config(model_cfg, dataset.view_specs())
+        return build_basisExpert_simple_concat_from_config(model_cfg, dataset.view_specs())
     if name in {"basisexperts_attention", "basis_experts_attention", "basis-experts-attention"}:
         from inr.models.basisExperts_attention import build_basisExperts_attention_from_config
         if dataset is None or not hasattr(dataset, "view_specs"):
@@ -285,6 +285,17 @@ def main():
     )
     print(f"Model build: {time.perf_counter() - t3:.2f}s")
 
+    pretrain_raw = train_cfg_raw.get("pretrain", {}) or {}
+    pretrain_cfg = PretrainConfig(
+        enabled=bool(pretrain_raw.get("enabled", False)),
+        epochs=int(pretrain_raw.get("epochs", 0)),
+        lr=float(pretrain_raw.get("lr", train_cfg_raw.get("lr", 5e-5))),
+        batch_size=int(pretrain_raw.get("batch_size", train_cfg_raw.get("batch_size", 65536))),
+        cluster_num_time_samples=int(pretrain_raw.get("cluster_num_time_samples", 16)),
+        cluster_seed=int(pretrain_raw.get("cluster_seed", train_cfg_raw.get("seed", 42))),
+        assignments_cache_path=str(pretrain_raw.get("assignments_cache_path", "")),
+    )
+
     train_cfg = TrainingConfig(
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
@@ -305,6 +316,7 @@ def main():
         lam_eq=float(train_cfg_raw.get("lam_eq", 0.0)),
         gam_div=float(train_cfg_raw.get("gam_div", 0.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
+        pretrain=pretrain_cfg,
     )
 
     print("Train start.")

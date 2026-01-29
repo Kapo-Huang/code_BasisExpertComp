@@ -1,9 +1,12 @@
 import math
+from pathlib import Path
 from typing import Dict, Iterable, List, Optional, Tuple
 
+import numpy as np
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.data import Dataset
 
 from .siren import SineLayer
 
@@ -73,10 +76,8 @@ class SirenMLP(nn.Module):
         h = self.mlp(x)
         return self.final(h)
 
-
 class ExpertEncoder(nn.Module):
     """Expert encoder that maps coords to latent features."""
-
     def __init__(
         self,
         in_features: int,
@@ -117,7 +118,6 @@ class ExpertEncoder(nn.Module):
             x = self.pos_enc(x)
         return self.mlp(x)
 
-
 class ViewGating(nn.Module):
     """View-conditioned gating that outputs expert routing probabilities."""
 
@@ -147,10 +147,13 @@ class ViewGating(nn.Module):
         probs = torch.softmax(logits, dim=-1)
         return probs, logits
 
-
-class BasisExpertsNoConcat(nn.Module):
+class BasisExpertSimpleConcat(nn.Module):
     """
-    Variant where each view decoder only consumes its own h_v (no concatenation).
+    MoE-INR with view-conditioned gating and selectable fusion:
+    - concat: concatenate all view features
+    - mean: average view features
+    - mlp: MLP over concatenated view features
+    - none: per-view decoder with view embedding only
     """
 
     def __init__(
@@ -159,7 +162,6 @@ class BasisExpertsNoConcat(nn.Module):
         view_specs: Dict[str, int],
         num_experts: int = 7,
         expert_feature_dim: int = 128,
-        base_dim: Optional[int] = None,
         top_k: int = 2,
         view_embed_dim: int = 16,
         expert_use_positional_encoding: bool = True,
@@ -170,6 +172,8 @@ class BasisExpertsNoConcat(nn.Module):
         gate_num_layers: int = 3,
         decoder_hidden_dim: int = 128,
         decoder_num_layers: int = 3,
+        fusion_mode: str = "concat",
+        fusion_hidden_dim: int = 128,
         expert_first_omega_0: float = 30.0,
         expert_hidden_omega_0: float = 30.0,
         gate_first_omega_0: float = 30.0,
@@ -183,20 +187,14 @@ class BasisExpertsNoConcat(nn.Module):
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
 
-        if base_dim is not None:
-            base_dim = int(base_dim)
-            expert_feature_dim = 8 * base_dim
-            view_embed_dim = base_dim
-            expert_hidden_dim = 8 * base_dim
-            gate_hidden_dim = 8 * base_dim
-            decoder_hidden_dim = 8 * base_dim
-
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
         self.num_views = len(self.view_names)
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
         self.expert_feature_dim = expert_feature_dim
+        self.view_embed_dim = view_embed_dim
+        self.fusion_mode = self._normalize_fusion_mode(fusion_mode)
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
         self.gating = ViewGating(
@@ -225,10 +223,29 @@ class BasisExpertsNoConcat(nn.Module):
             ]
         )
 
+        if self.fusion_mode == "concat":
+            fused_dim = self.num_views * expert_feature_dim
+            self.fusion_mlp = None
+        elif self.fusion_mode == "mean":
+            fused_dim = expert_feature_dim
+            self.fusion_mlp = None
+        elif self.fusion_mode == "mlp":
+            fused_dim = expert_feature_dim
+            fusion_in_dim = self.num_views * expert_feature_dim
+            self.fusion_mlp = nn.Sequential(
+                nn.Linear(fusion_in_dim, fusion_hidden_dim),
+                nn.ReLU(),
+                nn.Linear(fusion_hidden_dim, fused_dim),
+            )
+        elif self.fusion_mode == "none":
+            fused_dim = expert_feature_dim + view_embed_dim
+            self.fusion_mlp = None
+        else:
+            raise ValueError(f"Unknown fusion_mode: {self.fusion_mode}")
         self.decoders = nn.ModuleDict(
             {
                 name: SirenMLP(
-                    in_dim=expert_feature_dim,
+                    in_dim=fused_dim,
                     out_dim=out_dim,
                     hidden_dim=decoder_hidden_dim,
                     num_layers=decoder_num_layers,
@@ -238,6 +255,19 @@ class BasisExpertsNoConcat(nn.Module):
                 for name, out_dim in self.view_dims.items()
             }
         )
+
+    @staticmethod
+    def _normalize_fusion_mode(mode: str) -> str:
+        key = (mode or "concat").strip().lower()
+        if key in {"concat", "simple_concat"}:
+            return "concat"
+        if key in {"mean", "simple_mean", "avg", "average"}:
+            return "mean"
+        if key in {"mlp", "simple_mlp"}:
+            return "mlp"
+        if key in {"none", "no_fusion", "nofusion"}:
+            return "none"
+        return key
 
     def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
         _, indices = torch.topk(probs, k=self.top_k, dim=-1)
@@ -259,41 +289,171 @@ class BasisExpertsNoConcat(nn.Module):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
+        # Compute expert features
         expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
 
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
         h_views: List[torch.Tensor] = []
+        view_embeds: List[torch.Tensor] = []
 
         for view_idx, _name in enumerate(self.view_names):
+            # Get gating probabilities for this view
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
             probs, _ = self.gating(coords, view_embed)
             mask = self._topk_mask(probs)
             masked_probs = probs * mask
             masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
+            # Fuse expert features for this view
             weights = masked_probs if hard_topk else probs
-
             h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
+
             probs_list.append(probs)
             masks_list.append(mask)
             h_views.append(h_v)
+            view_embeds.append(view_embed)
+        # Combine multi-view representations
+        h_views_tensor = torch.stack(h_views, dim=1)  # (B, V, F)
+        h_fused = None
+        if self.fusion_mode == "concat":
+            h_fused = torch.cat(h_views, dim=-1)  # (B, V * F)
+        elif self.fusion_mode == "mean":
+            h_fused = h_views_tensor.mean(dim=1)  # (B, F)
+        elif self.fusion_mode == "mlp":
+            h_flat = torch.cat(h_views, dim=-1)
+            h_fused = self.fusion_mlp(h_flat)
 
-        preds = {name: self.decoders[name](h_views[i]) for i, name in enumerate(self.view_names)}
+        if self.fusion_mode == "none":
+            preds = {}
+            for view_idx, name in enumerate(self.view_names):
+                decoder_in = torch.cat([h_views[view_idx], view_embeds[view_idx]], dim=-1)
+                preds[name] = self.decoders[name](decoder_in)
+        else:
+            preds = {name: self.decoders[name](h_fused) for name in self.view_names}
         output = preds if request is None else preds[request]
 
         if return_aux:
             aux = {
                 "probs": torch.stack(probs_list, dim=1),  # (B, V, M)
                 "masks": torch.stack(masks_list, dim=1),  # (B, V, M)
-                "H_views": torch.stack(h_views, dim=1),
+                "H_views": h_views_tensor,
+                "H_fused": h_fused if h_fused is not None else h_views_tensor,
                 "expert_feats": expert_feats,
             }
             return output, aux
         return output
 
+class MultiViewCoordDataset(Dataset):
+    """
+    Dataset for shared coords with multiple attribute targets.
 
+    coords.npy: (N, D)
+    y_attr.npy: (N, C_attr)
+    """
 
+    def __init__(
+        self,
+        coords_path: str,
+        attr_paths: Dict[str, str],
+        normalize: bool = True,
+        stats_path: Optional[str] = None,
+    ):
+        coords = np.load(coords_path, mmap_mode="r")
+        if not attr_paths:
+            raise ValueError("attr_paths must be a non-empty dict")
+
+        attrs = {}
+        for name, path in attr_paths.items():
+            data = np.load(path, mmap_mode="r")
+            if data.shape[0] != coords.shape[0]:
+                raise ValueError(f"Mismatched samples for {name}: {data.shape[0]} vs {coords.shape[0]}")
+            attrs[name] = data
+
+        self.x = torch.from_numpy(coords)
+        self.y = {name: torch.from_numpy(arr) for name, arr in attrs.items()}
+        self.normalize = normalize
+        self.stats_path = stats_path
+
+        if normalize:
+            stats_loaded = False
+            if stats_path and Path(stats_path).exists():
+                stats = np.load(stats_path)
+                try:
+                    self.x_mean = torch.from_numpy(stats["x_mean"]).to(torch.float32)
+                    self.x_std = torch.from_numpy(stats["x_std"]).to(torch.float32)
+                    self.y_mean = {}
+                    self.y_std = {}
+                    for name in self.y.keys():
+                        mean_key = f"y_mean_{name}"
+                        std_key = f"y_std_{name}"
+                        self.y_mean[name] = torch.from_numpy(stats[mean_key]).to(torch.float32)
+                        self.y_std[name] = torch.from_numpy(stats[std_key]).to(torch.float32)
+                        self.y_std[name] = torch.where(
+                            self.y_std[name] == 0, torch.ones_like(self.y_std[name]), self.y_std[name]
+                        )
+                    self.x_std = torch.where(self.x_std == 0, torch.ones_like(self.x_std), self.x_std)
+                    stats_loaded = True
+                except KeyError:
+                    stats_loaded = False
+
+            if not stats_loaded:
+                self.x_mean, self.x_std = self._compute_stats(self.x)
+                self.y_mean = {}
+                self.y_std = {}
+                for name, tensor in self.y.items():
+                    mean, std = self._compute_stats(tensor)
+                    self.y_mean[name] = mean
+                    self.y_std[name] = std
+                if stats_path:
+                    self._save_stats(stats_path)
+
+            self.x = (self.x - self.x_mean) / self.x_std
+            for name, tensor in self.y.items():
+                self.y[name] = (tensor - self.y_mean[name]) / self.y_std[name]
+        else:
+            self.x_mean = torch.zeros_like(self.x[:1])
+            self.x_std = torch.ones_like(self.x[:1])
+            self.y_mean = {name: torch.zeros_like(tensor[:1]) for name, tensor in self.y.items()}
+            self.y_std = {name: torch.ones_like(tensor[:1]) for name, tensor in self.y.items()}
+
+    @staticmethod
+    def _compute_stats(tensor: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
+        mean = tensor.mean(0, keepdim=True)
+        std = tensor.std(0, keepdim=True)
+        std = torch.where(std == 0, torch.ones_like(std), std)
+        return mean, std
+
+    def _save_stats(self, stats_path: str) -> None:
+        Path(stats_path).parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "x_mean": self.x_mean.numpy(),
+            "x_std": self.x_std.numpy(),
+        }
+        for name in self.y.keys():
+            payload[f"y_mean_{name}"] = self.y_mean[name].numpy()
+            payload[f"y_std_{name}"] = self.y_std[name].numpy()
+        np.savez(stats_path, **payload)
+
+    def __len__(self):
+        return self.x.shape[0]
+
+    def __getitem__(self, idx):
+        xb = self.x[idx]
+        yb = {name: tensor[idx] for name, tensor in self.y.items()}
+        return xb, yb
+
+    def view_specs(self) -> Dict[str, int]:
+        return {name: int(tensor.shape[1]) for name, tensor in self.y.items()}
+
+    def denormalize_attr(self, name: str, y_norm: torch.Tensor) -> torch.Tensor:
+        if not self.normalize:
+            return y_norm
+        mean = self.y_mean[name].to(y_norm.device)
+        std = self.y_std[name].to(y_norm.device)
+        return y_norm * std + mean
+
+# Reconstruction loss.
 def reconstruction_loss(
     preds: Dict[str, torch.Tensor],
     targets: Dict[str, torch.Tensor],
@@ -314,13 +474,13 @@ def reconstruction_loss(
             total = total + weight * F.l1_loss(pred, target)
     return total
 
-
+# Expert load balance loss.
 def load_balance_loss(probs: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
     rho = masks.mean(dim=(0, 1))
     rho_hat = probs.mean(dim=(0, 1))
     return torch.mean(rho * rho_hat)
 
-
+# Expert diversity loss.
 def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tensor:
     num_experts = expert_feats.shape[1]
     if num_experts < 2:
@@ -331,59 +491,42 @@ def diversity_loss(expert_feats: torch.Tensor, sigma: float = 1.0) -> torch.Tens
     mask = 1.0 - torch.eye(num_experts, device=expert_feats.device)
     return (sim * mask).sum() / (mask.sum() + 1e-9)
 
-
-def example_train_step(
-    model: BasisExpertsNoConcat,
-    batch: Tuple[torch.Tensor, Dict[str, torch.Tensor]],
-    *,
-    weights: Optional[Dict[str, float]] = None,
-    lam_eq: float = 0.0,
-    gam_div: float = 0.0,
-    loss_type: str = "mse",
-) -> Dict[str, torch.Tensor]:
-    coords, targets = batch
-    preds, aux = model(coords, return_aux=True)
-    loss_recon = reconstruction_loss(preds, targets, weights=weights, loss_type=loss_type)
-    loss = loss_recon
-
-    if lam_eq > 0.0:
-        loss_eq = load_balance_loss(aux["probs"], aux["masks"])
-        loss = loss + lam_eq * loss_eq
-    else:
-        loss_eq = torch.zeros((), device=coords.device)
-
-    if gam_div > 0.0:
-        loss_div = diversity_loss(aux["expert_feats"])
-        loss = loss + gam_div * loss_div
-    else:
-        loss_div = torch.zeros((), device=coords.device)
-
-    return {
-        "loss": loss,
-        "loss_recon": loss_recon,
-        "loss_eq": loss_eq,
-        "loss_div": loss_div,
-    }
-
-
-def build_basisExperts_no_concat_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsNoConcat:
+def build_basisExpert_simple_concat_from_config(
+    cfg: Dict, view_specs: Dict[str, int]
+) -> BasisExpertSimpleConcat:
     base_dim = cfg.get("base_dim")
-    return BasisExpertsNoConcat(
+    if base_dim is not None:
+        base_dim = int(base_dim)
+        expert_feature_dim = 8 * base_dim
+        view_embed_dim = base_dim
+        expert_hidden_dim = 8 * base_dim
+        gate_hidden_dim = 8 * base_dim
+        decoder_hidden_dim = 8 * base_dim
+        fusion_hidden_dim = int(cfg.get("fusion_hidden_dim", 8 * base_dim))
+    else:
+        expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
+        view_embed_dim = int(cfg.get("view_embed_dim", 16))
+        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
+        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
+        decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
+        fusion_hidden_dim = int(cfg.get("fusion_hidden_dim", decoder_hidden_dim))
+    return BasisExpertSimpleConcat(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
-        expert_feature_dim=int(cfg.get("expert_feature_dim", 128)),
-        base_dim=base_dim,
+        expert_feature_dim=expert_feature_dim,
         top_k=int(cfg.get("top_k", 2)),
-        view_embed_dim=int(cfg.get("view_embed_dim", 16)),
+        view_embed_dim=view_embed_dim,
         expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
-        expert_hidden_dim=int(cfg.get("expert_hidden_dim", 128)),
+        expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
-        gate_hidden_dim=int(cfg.get("gate_hidden_dim", 128)),
+        gate_hidden_dim=gate_hidden_dim,
         gate_num_layers=int(cfg.get("gate_num_layers", 3)),
-        decoder_hidden_dim=int(cfg.get("decoder_hidden_dim", 128)),
+        decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
+        fusion_mode=str(cfg.get("fusion_mode", "concat")),
+        fusion_hidden_dim=fusion_hidden_dim,
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
         gate_first_omega_0=float(cfg.get("gate_first_omega_0", 30.0)),

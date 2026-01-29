@@ -9,14 +9,14 @@ data:
     X: 600
     Y: 248
     Z: 248
-    T: 2
+    T: 10
   target_dir: ./data/raw/ionization/train
   normalize: true
 model:
   name: basisExperts
   in_features: 4
   num_experts: 7
-  base_dim: 16
+  base_dim: 20
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6

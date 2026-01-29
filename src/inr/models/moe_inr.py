@@ -7,17 +7,37 @@ import torch.nn as nn
 from .siren import SineLayer
 
 
-class LearnableFourierPE(nn.Module):
-    """Learnable Fourier features: Linear -> [sin, cos]."""
-
-    def __init__(self, in_features: int, base_dim: int):
+class PositionalEncoding(nn.Module):
+    """NeRF-style positional encoding."""
+    def __init__(
+        self,
+        in_features: int,
+        num_frequencies: int = 6,
+        include_input: bool = False,
+        log_sampling: bool = True,
+    ):
         super().__init__()
-        self.proj = nn.Linear(in_features, base_dim)
-        self.out_dim = 2 * base_dim
+        if log_sampling:
+            freq_bands = 2.0 ** torch.arange(num_frequencies) * math.pi
+        else:
+            freq_bands = torch.linspace(1.0, 2.0 ** (num_frequencies - 1), num_frequencies) * math.pi
+        self.register_buffer("freq_bands", freq_bands)
+        self.in_features = in_features
+        self.include_input = include_input
+        self.out_dim = in_features * (int(include_input) + 2 * num_frequencies)
+        print(self.out_dim)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        u = self.proj(x)
-        return torch.cat([torch.sin(u), torch.cos(u)], dim=-1)
+        """
+        x: (B, in_features)
+        return: (B, out_dim)
+        """
+        angles = x.unsqueeze(-1) * self.freq_bands
+        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        encoded = encoded.reshape(x.shape[0], -1)
+        if self.include_input:
+            return torch.cat([x, encoded], dim=-1)
+        return encoded
 
 
 class SirenMLP(nn.Module):
@@ -100,30 +120,49 @@ class BottleneckResBlock(nn.Module):
 
 class SharedSirenEncoder(nn.Module):
     """
-    Encoder with learnable Fourier features -> sine -> sine -> residual block.
+    Encoder with positional encoding -> sine -> sine -> residual SIREN block.
     """
 
     def __init__(
         self,
         in_features: int = 4,
-        base_dim: int = 16,
+        feature_dim: int = 256,
+        base_dim: Optional[int] = None,
+        num_frequencies: int = 6,
+        include_input: bool = True,
         first_omega_0: float = 30.0,
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.base_dim = int(base_dim)
-        self.pe = LearnableFourierPE(in_features=in_features, base_dim=self.base_dim)
-        self.sine1 = SineLayer(2 * self.base_dim, 4 * self.base_dim, omega_0=first_omega_0, is_first=True)
-        self.sine2 = SineLayer(4 * self.base_dim, 8 * self.base_dim, omega_0=hidden_omega_0)
-        self.res_block = BottleneckResBlock(
-            8 * self.base_dim,
-            8 * self.base_dim,
-            bottleneck_dim=2 * self.base_dim,
+        self.pos_enc = PositionalEncoding(
+            in_features=in_features,
+            num_frequencies=num_frequencies,
+            include_input=include_input,
         )
-        self.out_dim = 8 * self.base_dim
+        pos_dim = self.pos_enc.out_dim
+        self.pe_proj = None
+        if base_dim is not None:
+            target_pos_dim = 2 * base_dim
+            if pos_dim != target_pos_dim:
+                self.pe_proj = nn.Linear(pos_dim, target_pos_dim)
+                pos_dim = target_pos_dim
+            sine1_dim = 4 * base_dim
+            sine2_dim = 8 * base_dim
+            res_dim = 8 * base_dim
+        else:
+            sine1_dim = feature_dim
+            sine2_dim = feature_dim
+            res_dim = feature_dim
+
+        self.sine1 = SineLayer(pos_dim, sine1_dim, omega_0=first_omega_0, is_first=True)
+        self.sine2 = SineLayer(sine1_dim, sine2_dim, omega_0=hidden_omega_0)
+        self.res_block = BottleneckResBlock(sine2_dim, res_dim)
+        self.out_dim = res_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        h = self.pe(x)
+        h = self.pos_enc(x)
+        if self.pe_proj is not None:
+            h = self.pe_proj(h)
         h = self.sine1(h)
         h = self.sine2(h)
         return self.res_block(h)
@@ -138,18 +177,23 @@ class PolicyNetwork(nn.Module):
     def __init__(
         self,
         in_features: int = 4,
-        base_dim: int = 16,
+        hidden_dim: int = 128,
+        num_layers: int = 3,
         num_experts: int = 7,
         gate_in_dim: Optional[int] = None,
         first_omega_0: float = 30.0,
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.base_dim = int(base_dim)
-        self.feature1 = SineLayer(in_features, self.base_dim, omega_0=first_omega_0, is_first=True)
-        self.feature2 = SineLayer(self.base_dim, self.base_dim, omega_0=hidden_omega_0)
+        assert num_layers >= 2
+
+        layers = []
+        layers.append(SineLayer(in_features, hidden_dim, omega_0=first_omega_0, is_first=True))
+        for _ in range(num_layers - 2):
+            layers.append(SineLayer(hidden_dim, hidden_dim, omega_0=hidden_omega_0))
+        self.feature = nn.Sequential(*layers)
         if gate_in_dim is None:
-            gate_in_dim = self.base_dim
+            gate_in_dim = hidden_dim
         self.gate = nn.Linear(gate_in_dim, num_experts)
 
         with torch.no_grad():
@@ -159,11 +203,11 @@ class PolicyNetwork(nn.Module):
                 self.gate.bias.zero_()
 
         self.num_experts = num_experts
-        self.hidden_dim = self.base_dim
+        self.hidden_dim = hidden_dim
         self.gate_in_dim = gate_in_dim
 
     def forward(self, x: torch.Tensor, encoder_feat: Optional[torch.Tensor] = None):
-        feat = self.feature2(self.feature1(x))
+        feat = self.feature(x)
         gate_input = feat
         if encoder_feat is not None:
             gate_input = torch.cat([encoder_feat, feat], dim=-1)
@@ -179,12 +223,23 @@ class ExpertDecoder(nn.Module):
         self,
         in_dim: int,
         out_features: int = 1,
+        hidden_dim: int = 256,
+        num_layers: int = 3,
+        first_omega_0: float = 30.0,
+        hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.linear = nn.Linear(in_dim, out_features)
+        self.mlp = SirenMLP(
+            in_dim=in_dim,
+            out_dim=out_features,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            first_omega_0=first_omega_0,
+            hidden_omega_0=hidden_omega_0,
+        )
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.linear(x)
+        return self.mlp(x)
 
 
 class MoEINR(nn.Module):
@@ -200,55 +255,63 @@ class MoEINR(nn.Module):
         in_features: int = 4,
         out_features: int = 1,
         num_experts: int = 7,
-        base_dim: int = 16,
+        encoder_feature_dim: int = 256,
+        base_dim: Optional[int] = None,
         encoder_first_omega_0: float = 30.0,
         encoder_hidden_omega_0: float = 30.0,
+        policy_hidden_dim: int = 128,
+        policy_num_layers: int = 3,
         policy_first_omega_0: float = 30.0,
         policy_hidden_omega_0: float = 30.0,
+        expert_hidden_dim: int = 256,
+        expert_num_layers: int = 3,
+        expert_first_omega_0: float = 30.0,
+        expert_hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.base_dim = int(base_dim)
 
         self.encoder = SharedSirenEncoder(
             in_features=in_features,
-            base_dim=self.base_dim,
+            feature_dim=encoder_feature_dim,
+            base_dim=base_dim,
+            num_frequencies=int(base_dim / in_features),
+            include_input=False,
             first_omega_0=encoder_first_omega_0,
             hidden_omega_0=encoder_hidden_omega_0,
         )
 
-        encoder_dim = 8 * self.base_dim
         self.policy = PolicyNetwork(
             in_features=in_features,
-            base_dim=self.base_dim,
+            hidden_dim=policy_hidden_dim,
+            num_layers=policy_num_layers,
             num_experts=num_experts,
-            gate_in_dim=encoder_dim + self.base_dim,
+            gate_in_dim=encoder_feature_dim + policy_hidden_dim,
             first_omega_0=policy_first_omega_0,
             hidden_omega_0=policy_hidden_omega_0,
         )
 
-        fused_dim = encoder_dim
+        fused_dim = encoder_feature_dim
         self.num_experts = num_experts
         self.experts = nn.ModuleList(
             [
                 ExpertDecoder(
                     in_dim=fused_dim,
                     out_features=out_features,
+                    hidden_dim=expert_hidden_dim,
+                    num_layers=expert_num_layers,
+                    first_omega_0=expert_first_omega_0,
+                    hidden_omega_0=expert_hidden_omega_0,
                 )
                 for _ in range(num_experts)
             ]
         )
         self.out_features = out_features
-        assert self.encoder.out_dim == 8 * self.base_dim
-        assert self.policy.hidden_dim == self.base_dim
-        assert self.policy.gate_in_dim == 9 * self.base_dim
-        for expert in self.experts:
-            assert expert.linear.in_features == 8 * self.base_dim
 
     def forward(
         self,
         x: torch.Tensor,
         *,
-        hard_routing: Optional[bool] = None,
+        hard_routing: bool = False,
         return_all: bool = False,
     ):
         """
@@ -261,8 +324,7 @@ class MoEINR(nn.Module):
         preds = [expert(fused) for expert in self.experts]
         preds_all = torch.stack(preds, dim=1)  # [B, K, out_features]
 
-        use_hard = hard_routing if hard_routing is not None else (not self.training)
-        if use_hard:
+        if hard_routing:
             indices = torch.argmax(probs, dim=-1)
             y = preds_all[torch.arange(x.shape[0], device=x.device), indices]
         else:
@@ -276,16 +338,29 @@ class MoEINR(nn.Module):
 def build_moe_inr_from_config(cfg) -> MoEINR:
     """Helper to construct MoEINR from a plain dict/YAML config."""
     base_dim = cfg.get("base_dim")
-    if base_dim is None:
-        raise ValueError("MoEINR requires base_dim to be set.")
-    base_dim = int(base_dim)
+    if base_dim is not None:
+        base_dim = int(base_dim)
+        encoder_feature_dim = 8 * base_dim
+        policy_hidden_dim = base_dim
+        expert_hidden_dim = 8 * base_dim
+    else:
+        encoder_feature_dim = int(cfg.get("encoder_feature_dim", 256))
+        policy_hidden_dim = int(cfg.get("policy_hidden_dim", 128))
+        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 256))
     return MoEINR(
         in_features=int(cfg.get("in_features", 4)),
         out_features=int(cfg.get("out_features", 1)),
         num_experts=int(cfg.get("num_experts", 7)),
+        encoder_feature_dim=encoder_feature_dim,
         base_dim=base_dim,
         encoder_first_omega_0=float(cfg.get("encoder_first_omega_0", 30.0)),
         encoder_hidden_omega_0=float(cfg.get("encoder_hidden_omega_0", 30.0)),
+        policy_hidden_dim=policy_hidden_dim,
+        policy_num_layers=int(cfg.get("policy_num_layers", 3)),
         policy_first_omega_0=float(cfg.get("policy_first_omega_0", 30.0)),
         policy_hidden_omega_0=float(cfg.get("policy_hidden_omega_0", 30.0)),
+        expert_hidden_dim=expert_hidden_dim,
+        expert_num_layers=int(cfg.get("expert_num_layers", 3)),
+        expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
+        expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
     )
