@@ -59,8 +59,8 @@ class VolumetricDataset(Dataset):
         if target_stats is not None:
             mean = np.asarray(target_stats["mean"])
             std = np.asarray(target_stats["std"])
-            self.y_mean = torch.from_numpy(mean).to(torch.float32)
-            self.y_std = torch.from_numpy(std).to(torch.float32)
+            self.y_mean = torch.from_numpy(mean)
+            self.y_std = torch.from_numpy(std)
             if self.y_mean.ndim == 1:
                 self.y_mean = self.y_mean.view(1, -1)
             if self.y_std.ndim == 1:
@@ -182,8 +182,8 @@ class MultiTargetVolumetricDataset(Dataset):
             for name, stats in target_stats.items():
                 mean = np.asarray(stats["mean"])
                 std = np.asarray(stats["std"])
-                mean_t = torch.from_numpy(mean).to(torch.float32)
-                std_t = torch.from_numpy(std).to(torch.float32)
+                mean_t = torch.from_numpy(mean)
+                std_t = torch.from_numpy(std)
                 if mean_t.ndim == 1:
                     mean_t = mean_t.view(1, -1)
                 if std_t.ndim == 1:
@@ -297,7 +297,7 @@ def _singletarget_collate(
     block = np.asarray(y_flat[idx], dtype=np.float32)
     if block.ndim == 1:
         block = block.reshape(-1, 1)
-    yb = torch.from_numpy(block.copy())
+    yb = torch.from_numpy(np.ascontiguousarray(block))
     if dataset.normalize_targets:
         dataset._ensure_target_stats()
         yb = (yb - dataset.y_mean.squeeze(0)) / dataset.y_std.squeeze(0)
@@ -348,10 +348,9 @@ def _multitarget_collate(
         if dataset.normalize_targets:
             dataset._ensure_target_stats(name)
         block = np.asarray(flat[idx], dtype=np.float32)
-        
         if block.ndim == 1:
             block = block.reshape(-1, 1)
-        target = torch.from_numpy(block.copy())
+        target = torch.from_numpy(np.ascontiguousarray(block))
         if dataset.normalize_targets:
             target = (target - dataset._y_mean_s[name]) / dataset._y_std_s[name]
         yb[name] = target
