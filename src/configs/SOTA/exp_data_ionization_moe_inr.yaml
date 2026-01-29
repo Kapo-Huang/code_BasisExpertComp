@@ -1,0 +1,52 @@
+experiment: exp_data_ionization_moe_inr
+exp_id: moe_inr-ionization
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_H+.npz
+  compute_target_stats: true
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 10
+  target_path: ./data/raw/ionization/train/target_H+_sub.npy
+  normalize: true
+model:
+  name: moe_inr
+  in_features: 4
+  out_features: 1
+  num_experts: 7
+  base_dim: 18
+  encoder_first_omega_0: 30.0
+  encoder_hidden_omega_0: 30.0
+  policy_num_layers: 3
+  policy_first_omega_0: 30.0
+  policy_hidden_omega_0: 30.0
+  expert_num_layers: 2
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+training:
+  epochs: 60
+  batch_size: 16000
+  pred_batch_size: 16000
+  num_workers: 4
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0.0
+  gam_div: 0.0
+  pretrain:
+    enabled: true
+    epochs: 1
+    lr: 5.0e-5
+    batch_size: 16000
+    cluster_num_time_samples: 8
+    cluster_seed: 42
+    assignments_cache_path: ""

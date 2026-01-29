@@ -1,9 +1,11 @@
-experiment: exp_data_ionization_basis_experts
-exp_id: basis_experts-ionization
+experiment: exp_data_ionization_base_moe_enc_view_add_dec_trunk
+exp_id: baseline-base_moe_enc_view_add_dec_trunk-ionization
 experiment_root: experiments
 data:
   dataset_name: ionization
   split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_multi.npz
+  compute_target_stats: true
   data_root: ./data
   volume_shape:
     X: 600
@@ -13,16 +15,16 @@ data:
   target_dir: ./data/raw/ionization/train
   normalize: true
 model:
-  name: basis_experts
+  name: base_moe_enc_view_add_dec_trunk
   in_features: 4
   num_experts: 7
-  base_dim: 20
+  base_dim: 8
   top_k: 2
   expert_use_positional_encoding: true
   expert_num_frequencies: 6
-  expert_num_layers: 3
+  expert_num_layers: 2
   gate_num_layers: 3
-  decoder_num_layers: 3
+  decoder_num_layers: 2
   expert_first_omega_0: 30.0
   expert_hidden_omega_0: 30.0
   gate_first_omega_0: 30.0

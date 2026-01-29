@@ -1,0 +1,36 @@
+experiment: exp_data_ionization_coordnet
+exp_id: coordnet-ionization
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_H+.npz
+  compute_target_stats: true
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 10
+  target_path: ./data/raw/ionization/train/target_H+_sub.npy
+  normalize: true
+model:
+  name: coordnet
+  in_features: 4
+  out_features: 1
+  init_features: 64
+  num_res: 10
+training:
+  epochs: 60
+  batch_size: 16000
+  pred_batch_size: 16000
+  num_workers: 4
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0.0
+  gam_div: 0.0

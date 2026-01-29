@@ -10,9 +10,28 @@ from inr.data import (
     VolumetricDataset,
 )
 from inr.datasets.base import compute_target_stats_streaming
-from inr.models.moe_inr import build_moe_inr_from_config
-from inr.models.basisExpert_simple_concat import build_basisExpert_simple_concat_from_config
-from inr.models.siren import build_siren_from_config
+from inr.models.baseline.base_moe_enc_view_add_dec_trunk import (
+    build_base_moe_enc_view_add_dec_trunk_from_config,
+)
+from inr.models.baseline.base_shared_enc_view_add_shared_dec_trunk import (
+    build_base_shared_enc_view_add_shared_dec_trunk_from_config,
+)
+from inr.models.baseline.base_shared_enc_view_attention_fused_dec_trunk import (
+    build_base_shared_enc_view_attention_fused_dec_trunk_from_config,
+)
+from inr.models.basis_expert.experts_attention import build_basisExperts_attention_from_config
+from inr.models.basis_expert.experts_attention_light_pe import (
+    build_basisExperts_attention_light_pe_from_config,
+)
+from inr.models.basis_expert.light_basis_expert import build_light_basis_expert_from_config
+from inr.models.basis_expert.simple import build_basisExpert_simple_concat_from_config
+from inr.models.sota.coordnet import build_coordnet_from_config
+from inr.models.sota.moe_inr import build_moe_inr_from_config
+from inr.models.sota.siren import build_siren_from_config
+from inr.models.sota.stsr_inr import (
+    build_stsr_inr_from_config,
+    build_stsr_inr_multiview_from_config,
+)
 from inr.training.loops import PretrainConfig, TrainingConfig, train_model
 
 def parse_args():
@@ -25,25 +44,62 @@ def load_config(path: str):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
+def _normalize_model_name(name: str) -> str:
+    return str(name).strip().lower().replace("-", "_")
+
+
+def _require_view_specs(dataset, model_name: str):
+    if dataset is None or not hasattr(dataset, "view_specs"):
+        raise ValueError(f"{model_name} requires a MultiTargetVolumetricDataset with view_specs().")
+    return dataset.view_specs()
+
+
 def build_model(model_cfg, dataset=None):
-    name = model_cfg["name"].lower()
+    name_raw = model_cfg["name"]
+    name = _normalize_model_name(name_raw)
+
     if name == "siren":
         return build_siren_from_config(model_cfg)
-    if name in {"moe_inr", "moeinr", "moe-inr"}:
+    if name in {"moe_inr", "moeinr"}:
         return build_moe_inr_from_config(model_cfg)
-    if name in {"basisexperts", "basis_experts", "basis-experts"}:
-        if dataset is None or not hasattr(dataset, "view_specs"):
-            raise ValueError("basisExperts requires a MultiTargetVolumetricDataset with view_specs().")
-        return build_basisExpert_simple_concat_from_config(model_cfg, dataset.view_specs())
-    if name in {"basisexperts_attention", "basis_experts_attention", "basis-experts-attention"}:
-        from inr.models.basisExperts_attention import build_basisExperts_attention_from_config
-        if dataset is None or not hasattr(dataset, "view_specs"):
-            raise ValueError("basisExperts_attention requires a MultiTargetVolumetricDataset with view_specs().")
-        return build_basisExperts_attention_from_config(model_cfg, dataset.view_specs())
-    if name == "coordnet":
-        from inr.models.CoordNet import build_coordnet_from_config
+    if name in {"coordnet", "coord_net"}:
         return build_coordnet_from_config(model_cfg)
-    raise ValueError(f"Unknown model name: {name}")
+    if name in {"stsr_inr", "stsrinr"}:
+        return build_stsr_inr_from_config(model_cfg)
+    if name in {"stsr_inr_multiview", "stsrinr_multiview"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_stsr_inr_multiview_from_config(model_cfg, view_specs)
+
+    if name in {"basis_experts", "basisexperts", "basis_expert"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_basisExpert_simple_concat_from_config(model_cfg, view_specs)
+    if name in {"basis_experts_attention", "basisexperts_attention"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_basisExperts_attention_from_config(model_cfg, view_specs)
+    if name in {"basis_experts_attention_light_pe", "basisexperts_attention_light_pe"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_basisExperts_attention_light_pe_from_config(model_cfg, view_specs)
+    if name in {"light_basis_expert", "lightbasis_expert", "light_basisexperts"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_light_basis_expert_from_config(model_cfg, view_specs)
+
+    if name in {
+        "base_shared_enc_view_add_shared_dec_trunk",
+        "baseline_shared_enc_view_add_shared_dec_trunk",
+    }:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_base_shared_enc_view_add_shared_dec_trunk_from_config(model_cfg, view_specs)
+    if name in {
+        "base_shared_enc_view_attention_fused_dec_trunk",
+        "baseline_shared_enc_view_attention_fused_dec_trunk",
+    }:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_base_shared_enc_view_attention_fused_dec_trunk_from_config(model_cfg, view_specs)
+    if name in {"base_moe_enc_view_add_dec_trunk", "baseline_moe_enc_view_add_dec_trunk"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_base_moe_enc_view_add_dec_trunk_from_config(model_cfg, view_specs)
+
+    raise ValueError(f"Unknown model name: {name_raw}")
 
 
 def resolve_data_paths(data_cfg):

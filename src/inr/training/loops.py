@@ -15,7 +15,7 @@ from inr.datasets.volumetric import (
     make_multitarget_collate,
     make_singletarget_collate,
 )
-from inr.models.basisExpert_simple_concat import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.training.losses import diversity_loss, load_balance_loss, reconstruction_loss
 from inr.pretrain.voxel_clustering import compute_voxel_cluster_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr

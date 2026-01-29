@@ -348,6 +348,7 @@ def _multitarget_collate(
         if dataset.normalize_targets:
             dataset._ensure_target_stats(name)
         block = np.asarray(flat[idx], dtype=np.float32)
+        
         if block.ndim == 1:
             block = block.reshape(-1, 1)
         target = torch.from_numpy(block.copy())

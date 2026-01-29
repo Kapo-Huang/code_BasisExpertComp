@@ -3,7 +3,7 @@ from typing import Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 
-from .basisExpert_simple_concat import ExpertEncoder, SirenMLP, ViewGating
+from .components import ExpertEncoder, SirenMLP, ViewGating, PositionalEncoding
 
 
 class TinyTransformerFusion(nn.Module):
@@ -37,7 +37,7 @@ class TinyTransformerFusion(nn.Module):
         return self.encoder(tokens)
 
 
-class BasisExpertsAttention(nn.Module):
+class BasisExpertsAttentionLightPE(nn.Module):
     """
     MoE-INR with cross-view transformer fusion and fixed decoder input size.
     """
@@ -50,7 +50,6 @@ class BasisExpertsAttention(nn.Module):
         expert_feature_dim: int = 128,
         top_k: int = 2,
         view_embed_dim: int = 16,
-        expert_use_positional_encoding: bool = True,
         expert_num_frequencies: int = 6,
         expert_hidden_dim: int = 128,
         expert_num_layers: int = 3,
@@ -83,9 +82,15 @@ class BasisExpertsAttention(nn.Module):
         self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
-        self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
-        self.gating = ViewGating(
+        self.pos_enc = PositionalEncoding(
             in_features=in_features,
+            num_frequencies=expert_num_frequencies,
+            include_input=True,
+        )
+        pe_dim = self.pos_enc.out_dim
+        # self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
+        self.gating = ViewGating(
+            in_features=pe_dim,
             view_embed_dim=view_embed_dim,
             num_experts=num_experts,
             hidden_dim=gate_hidden_dim,
@@ -97,9 +102,9 @@ class BasisExpertsAttention(nn.Module):
         self.experts = nn.ModuleList(
             [
                 ExpertEncoder(
-                    in_features=in_features,
+                    in_features=pe_dim,
                     feature_dim=expert_feature_dim,
-                    use_positional_encoding=expert_use_positional_encoding,
+                    use_positional_encoding=False,
                     num_frequencies=expert_num_frequencies,
                     hidden_dim=expert_hidden_dim,
                     num_layers=expert_num_layers,
@@ -163,8 +168,9 @@ class BasisExpertsAttention(nn.Module):
     ):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
-
-        expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
+        
+        x_pe = self.pos_enc(coords)
+        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
 
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
@@ -173,14 +179,14 @@ class BasisExpertsAttention(nn.Module):
         for view_idx, _name in enumerate(self.view_names):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
-            probs, _ = self.gating(coords, view_embed)
+            probs, _ = self.gating(x_pe, view_embed)
             mask = self._topk_mask(probs)
             masked_probs = probs * mask
             masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
             weights = masked_probs if hard_topk else probs
 
             h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-            h_v = h_v + self.view_embed_proj(view_embed)
+            # h_v = h_v + self.view_embed_proj(view_embed)
             probs_list.append(probs)
             masks_list.append(mask)
             h_views.append(h_v)
@@ -213,7 +219,9 @@ class BasisExpertsAttention(nn.Module):
         return output
 
 
-def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
+def build_basisExperts_attention_light_pe_from_config(
+    cfg: Dict, view_specs: Dict[str, int]
+) -> BasisExpertsAttentionLightPE:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
     base_dim = cfg.get("base_dim")
@@ -230,14 +238,13 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
         gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
         decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
-    return BasisExpertsAttention(
+    return BasisExpertsAttentionLightPE(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
         num_experts=int(cfg.get("num_experts", 7)),
         expert_feature_dim=expert_feature_dim,
         top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=view_embed_dim,
-        expert_use_positional_encoding=bool(cfg.get("expert_use_positional_encoding", True)),
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
         expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),

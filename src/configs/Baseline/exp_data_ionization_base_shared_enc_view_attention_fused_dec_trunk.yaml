@@ -1,5 +1,5 @@
-experiment: exp_data_ionization_basis_experts_attention
-exp_id: basis_experts-ionization-attention
+experiment: exp_data_ionization_base_shared_enc_view_attention_fused_dec_trunk
+exp_id: baseline-base_shared_enc_view_attention_fused_dec_trunk-ionization
 experiment_root: experiments
 data:
   dataset_name: ionization
@@ -15,20 +15,14 @@ data:
   target_dir: ./data/raw/ionization/train
   normalize: true
 model:
-  name: basis_experts_attention
+  name: base_shared_enc_view_attention_fused_dec_trunk
   in_features: 4
-  num_experts: 7
   base_dim: 8
-  top_k: 2
-  expert_use_positional_encoding: true
-  expert_num_frequencies: 6
-  expert_num_layers: 2
-  gate_num_layers: 3
+  shared_num_frequencies: 6
+  shared_num_layers: 2
   decoder_num_layers: 2
-  expert_first_omega_0: 30.0
-  expert_hidden_omega_0: 30.0
-  gate_first_omega_0: 30.0
-  gate_hidden_omega_0: 30.0
+  shared_first_omega_0: 30.0
+  shared_hidden_omega_0: 30.0
   decoder_first_omega_0: 30.0
   decoder_hidden_omega_0: 30.0
   fusion_num_layers: 2
@@ -46,5 +40,5 @@ training:
   early_stop_patience: 0
   seed: 42
   loss_type: mse
-  lam_eq: 1.0e-2
-  gam_div: 1.0e-3
+  lam_eq: 0.0
+  gam_div: 0.0
