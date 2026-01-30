@@ -18,10 +18,10 @@ model:
   name: light_basis_expert
   in_features: 4
   num_experts: 7
-  base_dim: 8
+  base_dim: 16
   top_k: 2
   expert_num_frequencies: 6
-  expert_num_layers: 2
+  expert_num_layers: 3
   gate_num_layers: 3
   decoder_num_layers: 2
   head_num_layers: 2
@@ -34,13 +34,15 @@ model:
   head_first_omega_0: 30.0
   head_hidden_omega_0: 30.0
 training:
-  epochs: 60
+  epochs: 300
   batch_size: 16000
   pred_batch_size: 16000
-  lr: 5.0e-5
+  batches_per_timestep: 4
+  lr: 1.0e-4
   val_split: 0.1
-  log_every: 1
-  save_every: 5
+  log_every: 10
+  log_psnr_every: 100
+  save_every: 300
   early_stop_patience: 0
   seed: 42
   loss_type: mse

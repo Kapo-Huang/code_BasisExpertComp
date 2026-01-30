@@ -7,7 +7,7 @@ from typing import Optional, Tuple
 import numpy as np
 import torch
 import torch.nn.functional as F
-from torch.utils.data import DataLoader, Dataset, Subset
+from torch.utils.data import DataLoader, Dataset, Sampler, Subset
 
 from inr.datasets.volumetric import (
     MultiTargetVolumetricDataset,
@@ -42,9 +42,11 @@ class TrainingConfig:
     batch_size: int = 8000
     pred_batch_size: int = 8000
     num_workers: int = 4
+    batches_per_timestep: int = 0
     lr: float = 5e-5
     val_split: float = 0.1
     log_every: int = 4
+    log_psnr_every: int = 5
     save_every: int = 0
     early_stop_patience: int = 0
     seed: int = 42
@@ -71,7 +73,7 @@ def _is_multiview_target(targets) -> bool:
     return isinstance(targets, dict)
 
 
-def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
+def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig, return_aux: bool = False):
     try:
         preds, aux = model(xb, return_aux=True)
     except TypeError:
@@ -95,6 +97,8 @@ def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
         loss_div = diversity_loss(aux["expert_feats"])
         loss = loss + cfg.gam_div * loss_div
 
+    if return_aux:
+        return loss, loss_recon, loss_eq, loss_div, aux
     return loss, loss_recon, loss_eq, loss_div
 
 
@@ -109,6 +113,46 @@ def _resolve_collate(ds: Dataset):
 
 def _resolve_base_dataset(ds: Dataset):
     return ds.dataset if isinstance(ds, Subset) else ds
+
+
+class TimeStepRandomSampler(Sampler[int]):
+    def __init__(self, dataset: Dataset, volume_shape, samples_per_timestep: int, generator=None):
+        self.dataset = dataset
+        self.volume_shape = volume_shape
+        self.samples_per_timestep = int(samples_per_timestep)
+        self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+        self.generator = generator
+
+        self._per_t_indices = None
+        if isinstance(dataset, Subset):
+            indices = np.asarray(dataset.indices, dtype=np.int64)
+            V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
+            t = indices // V
+            self._per_t_indices = []
+            for ti in range(int(self.volume_shape.T)):
+                mask = t == ti
+                if not np.any(mask):
+                    raise ValueError(f"Subset has no samples for timestep t={ti}")
+                self._per_t_indices.append(indices[mask])
+
+    def __iter__(self):
+        V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
+        T = int(self.volume_shape.T)
+        if self._per_t_indices is None:
+            for t in range(T):
+                offsets = torch.randint(0, V, (self.samples_per_timestep,), generator=self.generator)
+                base = t * V
+                for offset in offsets.tolist():
+                    yield base + offset
+        else:
+            for t in range(T):
+                pool = self._per_t_indices[t]
+                picks = torch.randint(0, len(pool), (self.samples_per_timestep,), generator=self.generator)
+                for pick in picks.tolist():
+                    yield int(pool[pick])
+
+    def __len__(self) -> int:
+        return self.total_samples
 
 
 def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: np.ndarray) -> DataLoader:
@@ -224,6 +268,15 @@ def build_dataloaders(
     train_ds, val_ds = dataset, None
 
     train_collate = _resolve_collate(train_ds)
+    sampler = None
+    shuffle = True
+    if cfg.batches_per_timestep > 0:
+        base_ds = _resolve_base_dataset(train_ds)
+        if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
+            raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
+        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.batch_size)
+        sampler = TimeStepRandomSampler(train_ds, base_ds.volume_shape, samples_per_timestep)
+        shuffle = False
     train_kwargs = {
         "pin_memory": True,
         "num_workers": cfg.num_workers,
@@ -236,7 +289,8 @@ def build_dataloaders(
     train_loader = DataLoader(
         train_ds,
         batch_size=cfg.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         **train_kwargs,
     )
     val_loader = None
@@ -295,10 +349,12 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     best_val = float("inf")
     best_state = None
     no_improve = 0
+    expert_select_counts = None
 
     for epoch in range(1, cfg.epochs + 1):
         model.train()
         epoch_loss = 0.0
+        steps_seen = 0
         data_time = 0.0
         compute_time = 0.0
         iterator = train_loader
@@ -309,13 +365,19 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             data_time += time.perf_counter() - prev_time
             step_start = time.perf_counter()
             xb, yb = _unpack_batch(batch)
-            xb = xb.to(device)
+            xb = xb.to(device, non_blocking=True)
             if _is_multiview_target(yb):
-                yb = {name: tensor.to(device) for name, tensor in yb.items()}
-                loss, loss_recon, loss_eq, loss_div = _compute_multiview_loss(model, xb, yb, cfg)
+                yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
+                loss, loss_recon, loss_eq, loss_div, aux = _compute_multiview_loss(
+                    model, xb, yb, cfg, return_aux=True
+                )
             else:
-                yb = yb.to(device)
-                pred = model(xb)
+                yb = yb.to(device, non_blocking=True)
+                try:
+                    pred, aux = model(xb, return_aux=True)
+                except TypeError:
+                    pred = model(xb)
+                    aux = {}
                 loss = criterion(pred, yb)
                 loss_recon = loss
                 loss_eq = torch.zeros((), device=loss.device)
@@ -329,10 +391,18 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             optim.zero_grad()
             loss.backward()
             optim.step()
-            epoch_loss += loss.item() * xb.shape[0]
+            epoch_loss += loss.item()
+            steps_seen += 1
+            if aux and "masks" in aux:
+                masks = aux["masks"].detach()
+                reduce_dims = tuple(range(masks.dim() - 1))
+                counts = masks.float().sum(dim=reduce_dims).to(torch.long).cpu()
+                if expert_select_counts is None:
+                    expert_select_counts = torch.zeros_like(counts)
+                expert_select_counts += counts
             compute_time += time.perf_counter() - step_start
             prev_time = time.perf_counter()
-        epoch_loss /= len(train_ds)
+        epoch_loss /= max(steps_seen, 1)
 
         val_loss = None
         if val_loader is not None:
@@ -354,6 +424,21 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         if epoch % cfg.log_every == 0 or epoch == 1:
             elapsed = time.time() - start_time
             if not is_multiview:
+                print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} time={elapsed:.1f}s")
+            else:
+                if val_loss is None:
+                    print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} time={elapsed:.1f}s")
+                else:
+                    print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} val={val_loss:.6e} time={elapsed:.1f}s")
+            if expert_select_counts is not None:
+                sumCount = expert_select_counts.sum().item()
+                counts_text = " ".join(
+                    f"E{i}={count} ({count / sumCount:.2%})" for i, count in enumerate(expert_select_counts.tolist())
+                )
+                print(f"Expert utilization rate: {counts_text}")
+                expert_select_counts = torch.zeros_like(expert_select_counts)
+        if (cfg.log_psnr_every > 0 and (epoch % cfg.log_psnr_every == 0)):
+            if not is_multiview:
                 with torch.no_grad():
                     preds, gts = [], []
                     val_iter = psnr_loader
@@ -361,7 +446,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         val_iter = tqdm(psnr_loader, desc=f"psnr {epoch}/{cfg.epochs}", leave=False)
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
-                        xb = xb.to(device)
+                        xb = xb.to(device, non_blocking=True)
                         pred = model(xb)
                         preds.append(pred.cpu())
                         gts.append(yb)
@@ -372,7 +457,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 data_range = float(torch.max(gt_denorm) - torch.min(gt_denorm))
                 data_range = data_range if data_range > 0 else 1.0
                 psnr_val = psnr(gt_denorm.numpy(), pred_denorm.numpy(), data_range=data_range)
-                print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} PSNR={psnr_val:.2f} time={elapsed:.1f}s")
+                elapsed = time.time() - start_time
+                print(f"PSNR epoch {epoch}/{cfg.epochs}: {psnr_val:.2f} time={elapsed:.1f}s")
             elif is_multiview:
                 with torch.no_grad():
                     pred_dict = {}
@@ -382,7 +468,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         val_iter = tqdm(psnr_loader, desc=f"psnr {epoch}/{cfg.epochs}", leave=False)
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
-                        xb = xb.to(device)
+                        xb = xb.to(device, non_blocking=True)
                         preds = model(xb)
                         for name, pred in preds.items():
                             pred_dict.setdefault(name, []).append(pred.cpu())
@@ -401,18 +487,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     psnr_val = psnr(gt_all.numpy(), pred_all.numpy(), data_range=data_range)
                     psnr_parts.append(f"{name}={psnr_val:.2f}")
                 psnr_text = " ".join(psnr_parts)
-                if val_loss is None:
-                    print(
-                        f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
-                        f"PSNR[{psnr_text}] time={elapsed:.1f}s"
-                    )
-                else:
-                    print(
-                        f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
-                        f"val={val_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
-                    )
-            else:
-                print(f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} time={elapsed:.1f}s")
+                elapsed = time.time() - start_time
+                print(f"PSNR epoch {epoch}/{cfg.epochs}: {psnr_text} time={elapsed:.1f}s")
         if epoch % cfg.log_every == 0 or epoch == 1:
             print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
@@ -461,7 +537,6 @@ def predict_full(model, dataset: Dataset, cfg: TrainingConfig, device, suffix: s
         num_workers=cfg.num_workers,
         collate_fn=pred_collate,
     )
-
     preds = []
     with torch.no_grad():
         iterator = loader
