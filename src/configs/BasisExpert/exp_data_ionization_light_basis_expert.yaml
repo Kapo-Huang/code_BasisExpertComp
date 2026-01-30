@@ -37,7 +37,7 @@ training:
   epochs: 300
   batch_size: 16000
   pred_batch_size: 16000
-  batches_per_timestep: 4
+  batches_per_timestep: 10
   lr: 1.0e-4
   val_split: 0.1
   log_every: 10
