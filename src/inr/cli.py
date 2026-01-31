@@ -362,6 +362,7 @@ def main():
         val_split=float(train_cfg_raw.get("val_split", 0.1)),
         log_every=int(train_cfg_raw.get("log_every", 4)),
         log_psnr_every=int(train_cfg_raw.get("log_psnr_every", train_cfg_raw.get("log_PSNR_every", 5))),
+        psnr_sample_ratio=float(train_cfg_raw.get("psnr_sample_ratio", 1.0)),
         save_every=int(train_cfg_raw.get("save_every", 0)),
         early_stop_patience=int(train_cfg_raw.get("early_stop_patience", 0)),
         seed=int(train_cfg_raw.get("seed", 42)),

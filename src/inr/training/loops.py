@@ -47,6 +47,7 @@ class TrainingConfig:
     val_split: float = 0.1
     log_every: int = 4
     log_psnr_every: int = 5
+    psnr_sample_ratio: float = 1.0
     save_every: int = 0
     early_stop_patience: int = 0
     seed: int = 42
@@ -330,12 +331,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         psnr_kwargs["prefetch_factor"] = 4
     if psnr_collate is not None:
         psnr_kwargs["collate_fn"] = psnr_collate
-    psnr_loader = DataLoader(
-        dataset,
-        batch_size=cfg.pred_batch_size,
-        shuffle=False,
-        **psnr_kwargs,
-    )
 
     model = model.to(device)
     _maybe_run_pretrain(model, dataset, cfg, device)
@@ -438,6 +433,20 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 print(f"Expert utilization rate: {counts_text}")
                 expert_select_counts = torch.zeros_like(expert_select_counts)
         if (cfg.log_psnr_every > 0 and (epoch % cfg.log_psnr_every == 0)):
+            psnr_ds = dataset
+            if cfg.psnr_sample_ratio < 1.0:
+                n_total = len(dataset)
+                n_sample = max(1, int(round(n_total * float(cfg.psnr_sample_ratio))))
+                gen = torch.Generator()
+                gen.manual_seed(int(cfg.seed))
+                indices = torch.randperm(n_total, generator=gen)[:n_sample].tolist()
+                psnr_ds = Subset(dataset, indices)
+            psnr_loader = DataLoader(
+                psnr_ds,
+                batch_size=cfg.pred_batch_size,
+                shuffle=False,
+                **psnr_kwargs,
+            )
             if not is_multiview:
                 with torch.no_grad():
                     preds, gts = [], []

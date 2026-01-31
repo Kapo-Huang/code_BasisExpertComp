@@ -39,12 +39,12 @@ training:
   pred_batch_size: 16000
   batches_per_timestep: 10
   lr: 1.0e-4
-  val_split: 0.1
   log_every: 10
-  log_psnr_every: 100
+  log_psnr_every: 10
+  psnr_sample_ratio: 0.1
   save_every: 300
   early_stop_patience: 0
   seed: 42
   loss_type: mse
   lam_eq: 1.0e-2
-  gam_div: 1.0e-3
+  gam_div: 1.0e-4
