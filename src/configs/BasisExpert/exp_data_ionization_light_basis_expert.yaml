@@ -48,3 +48,6 @@ training:
   loss_type: mse
   lam_eq: 1.0e-2
   gam_div: 1.0e-4
+  div_sigma: 1.0
+  gam_orth: 1.0e-4
+  orth_eps: 1.0e-6

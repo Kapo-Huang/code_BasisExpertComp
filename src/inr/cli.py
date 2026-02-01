@@ -374,6 +374,9 @@ def main():
         loss_type=str(train_cfg_raw.get("loss_type", "mse")),
         lam_eq=float(train_cfg_raw.get("lam_eq", 0.0)),
         gam_div=float(train_cfg_raw.get("gam_div", 0.0)),
+        gam_orth=float(train_cfg_raw.get("gam_orth", 0.0)),
+        orth_eps=float(train_cfg_raw.get("orth_eps", 1e-6)),
+        div_sigma=float(train_cfg_raw.get("div_sigma", 1.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
         pretrain=pretrain_cfg,
     )

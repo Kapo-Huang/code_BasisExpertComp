@@ -15,7 +15,7 @@ from inr.datasets.volumetric import (
     make_multitarget_collate,
     make_singletarget_collate,
 )
-from inr.training.losses import diversity_loss, load_balance_loss, reconstruction_loss
+from inr.training.losses import diversity_loss, load_balance_loss, orth_loss, reconstruction_loss
 from inr.pretrain.voxel_clustering import compute_voxel_cluster_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -59,6 +59,9 @@ class TrainingConfig:
     loss_type: str = "mse"
     lam_eq: float = 0.0
     gam_div: float = 0.0
+    gam_orth: float = 0.0
+    orth_eps: float = 1e-6
+    div_sigma: float = 1.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
 
@@ -95,12 +98,17 @@ def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig, return_aux: bool
 
     loss_div = torch.zeros((), device=xb.device)
     if cfg.gam_div > 0.0 and "expert_feats" in aux:
-        loss_div = diversity_loss(aux["expert_feats"])
+        loss_div = diversity_loss(aux["expert_feats"], sigma=cfg.div_sigma)
         loss = loss + cfg.gam_div * loss_div
 
+    loss_orth = torch.zeros((), device=xb.device)
+    if cfg.gam_orth > 0.0 and "expert_feats" in aux:
+        loss_orth = orth_loss(aux["expert_feats"], eps=cfg.orth_eps)
+        loss = loss + cfg.gam_orth * loss_orth
+
     if return_aux:
-        return loss, loss_recon, loss_eq, loss_div, aux
-    return loss, loss_recon, loss_eq, loss_div
+        return loss, loss_recon, loss_eq, loss_div, loss_orth, aux
+    return loss, loss_recon, loss_eq, loss_div, loss_orth
 
 
 def _resolve_collate(ds: Dataset):
@@ -363,7 +371,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             xb = xb.to(device, non_blocking=True)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
-                loss, loss_recon, loss_eq, loss_div, aux = _compute_multiview_loss(
+                loss, loss_recon, loss_eq, loss_div, loss_orth, aux = _compute_multiview_loss(
                     model, xb, yb, cfg, return_aux=True
                 )
             else:
@@ -377,6 +385,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 loss_recon = loss
                 loss_eq = torch.zeros((), device=loss.device)
                 loss_div = torch.zeros((), device=loss.device)
+                loss_orth = torch.zeros((), device=loss.device)
+                if cfg.gam_orth > 0.0 and "expert_feats" in aux:
+                    loss_orth = orth_loss(aux["expert_feats"], eps=cfg.orth_eps)
+                    loss = loss + cfg.gam_orth * loss_orth
                 if hasattr(model, "regularization_loss"):
                     reg = model.regularization_loss()
                     loss = loss + (reg if torch.is_tensor(reg) else torch.tensor(reg, device=loss.device, dtype=loss.dtype))
@@ -388,6 +400,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             optim.step()
             epoch_loss += loss.item()
             steps_seen += 1
+            # loss_orth is only for logging; zero if not used
             if aux and "masks" in aux:
                 masks = aux["masks"].detach()
                 reduce_dims = tuple(range(masks.dim() - 1))
@@ -522,7 +535,7 @@ def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConf
             xb = xb.to(device)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device) for name, tensor in yb.items()}
-                loss, _, _, _ = _compute_multiview_loss(model, xb, yb, cfg)
+                loss, _, _, _, _ = _compute_multiview_loss(model, xb, yb, cfg)
             else:
                 yb = yb.to(device)
                 pred = model(xb)
