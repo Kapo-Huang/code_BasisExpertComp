@@ -1,4 +1,6 @@
 import copy
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -20,9 +22,31 @@ from inr.pretrain.voxel_clustering import compute_voxel_cluster_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
 try:
-    from tqdm import tqdm
+    from tqdm import tqdm as _tqdm
 except Exception:
-    tqdm = None
+    _tqdm = None
+
+
+def _resolve_tqdm():
+    if _tqdm is None:
+        return None
+    flag = os.getenv("INR_TQDM")
+    if flag is not None and flag.strip().lower() in {"0", "false", "no", "off"}:
+        return None
+    disable = os.getenv("TQDM_DISABLE")
+    if disable is not None and disable.strip().lower() in {"1", "true", "yes", "on"}:
+        return None
+    auto = os.getenv("INR_TQDM_AUTO", "1").strip().lower()
+    if auto in {"1", "true", "yes", "on"}:
+        try:
+            if not sys.stderr.isatty():
+                return None
+        except Exception:
+            return None
+    return _tqdm
+
+
+tqdm = _resolve_tqdm()
 
 
 @dataclass
