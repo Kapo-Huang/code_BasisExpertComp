@@ -61,6 +61,18 @@ class PretrainConfig:
 
 
 @dataclass
+class TimeStepCurriculumConfig:
+    enabled: bool = False
+    mode: str = "linear"
+    start_timesteps: int = 0
+    end_timesteps: int = 0
+    warmup_epochs: int = 0
+    ramp_epochs: int = 0
+    stride_groups: int = 0
+    epochs_per_group: int = 0
+
+
+@dataclass
 class TrainingConfig:
     epochs: int = 100
     batch_size: int = 8000
@@ -88,6 +100,7 @@ class TrainingConfig:
     div_sigma: float = 1.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
+    timestep_curriculum: TimeStepCurriculumConfig = field(default_factory=TimeStepCurriculumConfig)
 
 
 def _unpack_batch(batch):
@@ -149,11 +162,21 @@ def _resolve_base_dataset(ds: Dataset):
 
 
 class TimeStepRandomSampler(Sampler[int]):
-    def __init__(self, dataset: Dataset, volume_shape, samples_per_timestep: int, generator=None):
+    def __init__(
+        self,
+        dataset: Dataset,
+        volume_shape,
+        samples_per_timestep: int,
+        generator=None,
+        active_timesteps: Optional[int] = None,
+    ):
         self.dataset = dataset
         self.volume_shape = volume_shape
         self.samples_per_timestep = int(samples_per_timestep)
-        self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+        self._active_timesteps = None
+        self._active_indices = None
+        self.total_samples = 0
+        self.set_active_timesteps(active_timesteps)
         self.generator = generator
 
         self._per_t_indices = None
@@ -168,17 +191,55 @@ class TimeStepRandomSampler(Sampler[int]):
                     raise ValueError(f"Subset has no samples for timestep t={ti}")
                 self._per_t_indices.append(indices[mask])
 
+    @property
+    def active_timesteps(self) -> Optional[int]:
+        return self._active_timesteps
+
+    def set_active_timesteps(self, active_timesteps: Optional[int]):
+        self._active_indices = None
+        if active_timesteps is None:
+            self._active_timesteps = None
+            self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+            return
+        active_timesteps = int(active_timesteps)
+        if active_timesteps <= 0:
+            raise ValueError("active_timesteps must be positive")
+        max_t = int(self.volume_shape.T)
+        if active_timesteps > max_t:
+            active_timesteps = max_t
+        self._active_timesteps = active_timesteps
+        self.total_samples = self.samples_per_timestep * int(self._active_timesteps)
+
+    def set_active_indices(self, indices: Optional[list]):
+        self._active_timesteps = None
+        if indices is None:
+            self._active_indices = None
+            self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+            return
+        if not indices:
+            raise ValueError("active_indices must be a non-empty list")
+        self._active_indices = [int(t) for t in indices]
+        self.total_samples = self.samples_per_timestep * len(self._active_indices)
+
     def __iter__(self):
         V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
         T = int(self.volume_shape.T)
+        active_indices = None
+        if self._active_indices is not None:
+            active_indices = [t for t in self._active_indices if 0 <= t < T]
+        elif self._active_timesteps is not None:
+            active_T = min(self._active_timesteps, T)
+            active_indices = list(range(active_T))
+        else:
+            active_indices = list(range(T))
         if self._per_t_indices is None:
-            for t in range(T):
+            for t in active_indices:
                 offsets = torch.randint(0, V, (self.samples_per_timestep,), generator=self.generator)
                 base = t * V
                 for offset in offsets.tolist():
                     yield base + offset
         else:
-            for t in range(T):
+            for t in active_indices:
                 pool = self._per_t_indices[t]
                 picks = torch.randint(0, len(pool), (self.samples_per_timestep,), generator=self.generator)
                 for pick in picks.tolist():
@@ -187,6 +248,41 @@ class TimeStepRandomSampler(Sampler[int]):
     def __len__(self) -> int:
         return self.total_samples
 
+
+def _resolve_curriculum_timesteps(cfg: TrainingConfig, epoch: int, total_timesteps: int) -> int:
+    cur = cfg.timestep_curriculum
+    if not cur.enabled:
+        return total_timesteps
+    if cur.start_timesteps <= 0 or cur.end_timesteps <= 0:
+        raise ValueError("timestep_curriculum requires positive start_timesteps and end_timesteps.")
+    start = min(int(cur.start_timesteps), total_timesteps)
+    end = min(int(cur.end_timesteps), total_timesteps)
+    if end < start:
+        raise ValueError("timestep_curriculum end_timesteps must be >= start_timesteps.")
+    warmup = max(0, int(cur.warmup_epochs))
+    ramp = max(0, int(cur.ramp_epochs))
+    if epoch <= warmup:
+        return start
+    if ramp <= 0:
+        return end
+    progress = min(1.0, (epoch - warmup) / float(ramp))
+    active = int(round(start + (end - start) * progress))
+    return max(start, min(end, active))
+
+
+def _resolve_stride_groups(cfg: TrainingConfig, epoch: int, total_timesteps: int) -> Tuple[list, int, int]:
+    cur = cfg.timestep_curriculum
+    if not cur.enabled:
+        return list(range(total_timesteps)), total_timesteps, 0
+    G = int(cur.stride_groups)
+    if G <= 0:
+        raise ValueError("stride_groups must be positive for stride curriculum.")
+    group_span = int(cur.epochs_per_group)
+    if group_span <= 0:
+        raise ValueError("epochs_per_group must be positive for stride curriculum.")
+    active_groups = min(G, 1 + (epoch - 1) // group_span)
+    active_indices = [t for t in range(total_timesteps) if (t % G) < active_groups]
+    return active_indices, active_groups, G
 
 def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: np.ndarray) -> DataLoader:
     base_ds = _resolve_base_dataset(dataset)
@@ -377,8 +473,32 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     best_state = None
     no_improve = 0
     expert_select_counts = None
+    sampler = getattr(train_loader, "sampler", None)
+    timestep_sampler = sampler if isinstance(sampler, TimeStepRandomSampler) else None
+    total_timesteps = None
+    last_active_timesteps = None
+    last_stride_groups = None
+    if cfg.timestep_curriculum.enabled:
+        if timestep_sampler is None:
+            raise ValueError("timestep_curriculum requires batches_per_timestep > 0.")
+        total_timesteps = int(timestep_sampler.volume_shape.T)
 
     for epoch in range(1, cfg.epochs + 1):
+        if cfg.timestep_curriculum.enabled and timestep_sampler is not None:
+            if cfg.timestep_curriculum.mode.lower() == "stride":
+                active_indices, active_groups, group_total = _resolve_stride_groups(
+                    cfg, epoch, total_timesteps
+                )
+                timestep_sampler.set_active_indices(active_indices)
+                if last_stride_groups != active_groups:
+                    print(f"Curriculum stride groups: {active_groups}/{group_total}")
+                    last_stride_groups = active_groups
+            else:
+                active_timesteps = _resolve_curriculum_timesteps(cfg, epoch, total_timesteps)
+                timestep_sampler.set_active_timesteps(active_timesteps)
+                if last_active_timesteps != active_timesteps:
+                    print(f"Curriculum timesteps: {active_timesteps}/{total_timesteps}")
+                    last_active_timesteps = active_timesteps
         model.train()
         epoch_loss = 0.0
         steps_seen = 0

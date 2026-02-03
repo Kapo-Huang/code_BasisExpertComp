@@ -32,7 +32,7 @@ from inr.models.sota.stsr_inr import (
     build_stsr_inr_from_config,
     build_stsr_inr_multiview_from_config,
 )
-from inr.training.loops import PretrainConfig, TrainingConfig, train_model
+from inr.training.loops import PretrainConfig, TimeStepCurriculumConfig, TrainingConfig, train_model
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train Implicit Neural Representations (SIREN variants)")
@@ -352,6 +352,18 @@ def main():
         assignments_cache_path=str(pretrain_raw.get("assignments_cache_path", "")),
     )
 
+    timestep_curriculum_raw = train_cfg_raw.get("timestep_curriculum", {}) or {}
+    timestep_curriculum_cfg = TimeStepCurriculumConfig(
+        enabled=bool(timestep_curriculum_raw.get("enabled", False)),
+        mode=str(timestep_curriculum_raw.get("mode", "linear")),
+        start_timesteps=int(timestep_curriculum_raw.get("start_timesteps", 0)),
+        end_timesteps=int(timestep_curriculum_raw.get("end_timesteps", 0)),
+        warmup_epochs=int(timestep_curriculum_raw.get("warmup_epochs", 0)),
+        ramp_epochs=int(timestep_curriculum_raw.get("ramp_epochs", 0)),
+        stride_groups=int(timestep_curriculum_raw.get("stride_groups", 0)),
+        epochs_per_group=int(timestep_curriculum_raw.get("epochs_per_group", 0)),
+    )
+
     train_cfg = TrainingConfig(
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
@@ -379,6 +391,7 @@ def main():
         div_sigma=float(train_cfg_raw.get("div_sigma", 1.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
         pretrain=pretrain_cfg,
+        timestep_curriculum=timestep_curriculum_cfg,
     )
 
     print("Train start.")
