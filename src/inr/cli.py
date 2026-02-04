@@ -392,6 +392,8 @@ def main():
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
         pretrain=pretrain_cfg,
         timestep_curriculum=timestep_curriculum_cfg,
+        lr_decay_rate=float(train_cfg_raw.get("lr_decay_rate", 0.0)),
+        lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
     )
 
     print("Train start.")

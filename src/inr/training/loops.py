@@ -101,6 +101,8 @@ class TrainingConfig:
     view_loss_weights: Optional[dict] = field(default_factory=dict)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
     timestep_curriculum: TimeStepCurriculumConfig = field(default_factory=TimeStepCurriculumConfig)
+    lr_decay_rate: float = 0.0
+    lr_decay_step: int = 0
 
 
 def _unpack_batch(batch):
@@ -484,6 +486,12 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         total_timesteps = int(timestep_sampler.volume_shape.T)
 
     for epoch in range(1, cfg.epochs + 1):
+        if cfg.lr_decay_step > 0 and cfg.lr_decay_rate > 0.0:
+            steps = (epoch - 1) // int(cfg.lr_decay_step)
+            lr = float(cfg.lr) * (float(cfg.lr_decay_rate) ** steps)
+            print(f"Epoch {epoch}: setting learning rate to {lr:.6e}")
+            for group in optim.param_groups:
+                group["lr"] = lr
         if cfg.timestep_curriculum.enabled and timestep_sampler is not None:
             if cfg.timestep_curriculum.mode.lower() == "stride":
                 active_indices, active_groups, group_total = _resolve_stride_groups(
