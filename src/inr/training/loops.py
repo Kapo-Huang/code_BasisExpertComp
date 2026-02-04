@@ -663,8 +663,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 psnr_text = " ".join(psnr_parts)
                 elapsed = time.time() - start_time
                 print(f"PSNR epoch {epoch}/{cfg.epochs}: {psnr_text} time={elapsed:.1f}s")
-        if epoch % cfg.log_every == 0 or epoch == 1:
-            print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
+        # if epoch % cfg.log_every == 0 or epoch == 1:
+        #     print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
             save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}")
             predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
