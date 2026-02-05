@@ -1,5 +1,6 @@
 import copy
 import logging
+import math
 import os
 import sys
 import time
@@ -94,7 +95,7 @@ class TrainingConfig:
     batch_size: int = 8000
     pred_batch_size: int = 8000
     num_workers: int = 4
-    batches_per_timestep: int = 0
+    batches_per_epoch_budget: int = 0
     lr: float = 5e-5
     val_split: float = 0.1
     log_every: int = 4
@@ -119,6 +120,7 @@ class TrainingConfig:
     timestep_curriculum: TimeStepCurriculumConfig = field(default_factory=TimeStepCurriculumConfig)
     lr_decay_rate: float = 0.0
     lr_decay_step: int = 0
+    freeze_router_at: float = 0.8
 
 
 def _unpack_batch(batch):
@@ -184,16 +186,17 @@ class TimeStepRandomSampler(Sampler[int]):
         self,
         dataset: Dataset,
         volume_shape,
-        samples_per_timestep: int,
+        total_samples_budget: int,
         generator=None,
         active_timesteps: Optional[int] = None,
     ):
         self.dataset = dataset
         self.volume_shape = volume_shape
-        self.samples_per_timestep = int(samples_per_timestep)
+        self.total_samples_budget = int(total_samples_budget)
+        self.samples_per_timestep = 0
+        self.total_samples = 0
         self._active_timesteps = None
         self._active_indices = None
-        self.total_samples = 0
         self.set_active_timesteps(active_timesteps)
         self.generator = generator
 
@@ -213,31 +216,43 @@ class TimeStepRandomSampler(Sampler[int]):
     def active_timesteps(self) -> Optional[int]:
         return self._active_timesteps
 
+    def _set_active_count(self, count: int):
+        count = int(count)
+        if count <= 0 or self.total_samples_budget <= 0:
+            self.samples_per_timestep = 0
+            self.total_samples = 0
+            return
+        self.samples_per_timestep = self.total_samples_budget // count
+        self.total_samples = self.samples_per_timestep * count
+
     def set_active_timesteps(self, active_timesteps: Optional[int]):
         self._active_indices = None
+        total_timesteps = int(self.volume_shape.T)
         if active_timesteps is None:
             self._active_timesteps = None
-            self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+            self._set_active_count(total_timesteps)
             return
         active_timesteps = int(active_timesteps)
         if active_timesteps <= 0:
             raise ValueError("active_timesteps must be positive")
-        max_t = int(self.volume_shape.T)
-        if active_timesteps > max_t:
-            active_timesteps = max_t
+        if active_timesteps > total_timesteps:
+            active_timesteps = total_timesteps
         self._active_timesteps = active_timesteps
-        self.total_samples = self.samples_per_timestep * int(self._active_timesteps)
+        self._set_active_count(self._active_timesteps)
 
     def set_active_indices(self, indices: Optional[list]):
         self._active_timesteps = None
         if indices is None:
             self._active_indices = None
-            self.total_samples = self.samples_per_timestep * int(self.volume_shape.T)
+            self._set_active_count(int(self.volume_shape.T))
             return
         if not indices:
             raise ValueError("active_indices must be a non-empty list")
-        self._active_indices = [int(t) for t in indices]
-        self.total_samples = self.samples_per_timestep * len(self._active_indices)
+        total_timesteps = int(self.volume_shape.T)
+        self._active_indices = [int(t) for t in indices if 0 <= int(t) < total_timesteps]
+        if not self._active_indices:
+            raise ValueError("active_indices must contain at least one valid timestep")
+        self._set_active_count(len(self._active_indices))
 
     def __iter__(self):
         V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
@@ -250,21 +265,61 @@ class TimeStepRandomSampler(Sampler[int]):
             active_indices = list(range(active_T))
         else:
             active_indices = list(range(T))
-        if self._per_t_indices is None:
-            for t in active_indices:
-                offsets = torch.randint(0, V, (self.samples_per_timestep,), generator=self.generator)
-                base = t * V
-                for offset in offsets.tolist():
-                    yield base + offset
-        else:
-            for t in active_indices:
-                pool = self._per_t_indices[t]
-                picks = torch.randint(0, len(pool), (self.samples_per_timestep,), generator=self.generator)
-                for pick in picks.tolist():
-                    yield int(pool[pick])
+        if not active_indices:
+            return
 
+        active_tensor = torch.tensor(active_indices, dtype=torch.long)
+        total = int(self.total_samples)
+        chunk_size = 1_000_000
+        remaining = total
+        while remaining > 0:
+            cur = min(chunk_size, remaining)
+            t_choice = torch.randint(0, len(active_indices), (cur,), generator=self.generator)
+            t_vals = active_tensor[t_choice]
+            if self._per_t_indices is None:
+                offsets = torch.randint(0, V, (cur,), generator=self.generator)
+                indices = t_vals * V + offsets
+                for idx in indices.tolist():
+                    yield int(idx)
+            else:
+                t_vals_np = t_vals.cpu().numpy()
+                out = np.empty(cur, dtype=np.int64)
+                for t in np.unique(t_vals_np):
+                    pos = np.where(t_vals_np == t)[0]
+                    pool = self._per_t_indices[int(t)]
+                    picks = torch.randint(0, len(pool), (len(pos),), generator=self.generator).cpu().numpy()
+                    out[pos] = pool[picks]
+                for idx in out.tolist():
+                    yield int(idx)
+            remaining -= cur
+
+    # def __len__(self) -> int:
+    #     return self.total_samples
     def __len__(self) -> int:
-        return self.total_samples
+        T = int(self.volume_shape.T)
+        if self._active_indices is not None:
+            active = len([t for t in self._active_indices if 0 <= t < T])
+        elif self._active_timesteps is not None:
+            active = min(int(self._active_timesteps), T)
+        else:
+            active = T
+        return self.samples_per_timestep * active
+
+
+
+def _freeze_router_modules(model: torch.nn.Module) -> int:
+    frozen = 0
+    for attr in ("gating", "view_embedding"):
+        if not hasattr(model, attr):
+            continue
+        module = getattr(model, attr)
+        if module is None:
+            continue
+        for param in module.parameters():
+            if param.requires_grad:
+                param.requires_grad = False
+                frozen += 1
+    return frozen
 
 
 def _resolve_curriculum_timesteps(cfg: TrainingConfig, epoch: int, total_timesteps: int) -> int:
@@ -323,11 +378,11 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
 
     sampler = None
     shuffle = True
-    if cfg.batches_per_timestep > 0:
+    if cfg.batches_per_epoch_budget > 0:
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
-        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.pretrain.batch_size)
-        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, samples_per_timestep)
+        total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.pretrain.batch_size)
+        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, total_samples_budget)
         shuffle = False
 
     pretrain_kwargs = {
@@ -358,11 +413,11 @@ def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> Data
 
     sampler = None
     shuffle = True
-    if cfg.batches_per_timestep > 0:
+    if cfg.batches_per_epoch_budget > 0:
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
-        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.pretrain.batch_size)
-        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, samples_per_timestep)
+        total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.pretrain.batch_size)
+        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, total_samples_budget)
         shuffle = False
 
     pretrain_kwargs = {
@@ -582,12 +637,12 @@ def build_dataloaders(
     train_collate = _resolve_collate(train_ds)
     sampler = None
     shuffle = True
-    if cfg.batches_per_timestep > 0:
+    if cfg.batches_per_epoch_budget > 0:
         base_ds = _resolve_base_dataset(train_ds)
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
-        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.batch_size)
-        sampler = TimeStepRandomSampler(train_ds, base_ds.volume_shape, samples_per_timestep)
+        total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.batch_size)
+        sampler = TimeStepRandomSampler(train_ds, base_ds.volume_shape, total_samples_budget)
         shuffle = False
     train_kwargs = {
         "pin_memory": True,
@@ -645,7 +700,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
 
     model = model.to(device)
     _maybe_run_pretrain(model, dataset, cfg, device)
-    optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
+    current_lr = float(cfg.lr)
+    optim = torch.optim.Adam(model.parameters(), lr=current_lr, betas=(0.9, 0.999))
     if cfg.loss_type == "l1":
         criterion = torch.nn.L1Loss()
     else:
@@ -663,16 +719,34 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     last_stride_groups = None
     if cfg.timestep_curriculum.enabled:
         if timestep_sampler is None:
-            raise ValueError("timestep_curriculum requires batches_per_timestep > 0.")
+            raise ValueError("timestep_curriculum requires batches_per_epoch_budget > 0.")
         total_timesteps = int(timestep_sampler.volume_shape.T)
 
+    freeze_epoch = None
+    router_frozen = False
+    freeze_at = float(cfg.freeze_router_at)
+    if freeze_at > 0:
+        if freeze_at < 1.0:
+            freeze_epoch = max(1, int(math.ceil(cfg.epochs * freeze_at)))
+        else:
+            freeze_epoch = int(freeze_at)
+
     for epoch in range(1, cfg.epochs + 1):
+        if not router_frozen and freeze_epoch is not None and epoch >= freeze_epoch:
+            frozen_params = _freeze_router_modules(model)
+            logger.info("Freeze router modules at epoch %s (params frozen: %s)", epoch, frozen_params)
+            optim = torch.optim.Adam(
+                [p for p in model.parameters() if p.requires_grad],
+                lr=current_lr,
+                betas=(0.9, 0.999),
+            )
+            router_frozen = True
         if cfg.lr_decay_step > 0 and cfg.lr_decay_rate > 0.0:
             steps = (epoch - 1) // int(cfg.lr_decay_step)
-            lr = float(cfg.lr) * (float(cfg.lr_decay_rate) ** steps)
-            logger.info("Epoch %s: setting learning rate to %.6e", epoch, lr)
+            current_lr = float(cfg.lr) * (float(cfg.lr_decay_rate) ** steps)
+            logger.info("Epoch %s: setting learning rate to %.6e", epoch, current_lr)
             for group in optim.param_groups:
-                group["lr"] = lr
+                group["lr"] = current_lr
         if cfg.timestep_curriculum.enabled and timestep_sampler is not None:
             if cfg.timestep_curriculum.mode.lower() == "stride":
                 active_indices, active_groups, group_total = _resolve_stride_groups(

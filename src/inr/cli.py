@@ -388,7 +388,7 @@ def main():
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
         pred_batch_size=int(train_cfg_raw.get("pred_batch_size", train_cfg_raw.get("batch_size", 65536))),
         num_workers=int(train_cfg_raw.get("num_workers", 4)),
-        batches_per_timestep=int(train_cfg_raw.get("batches_per_timestep", 0)),
+        batches_per_epoch_budget=int(train_cfg_raw.get("batches_per_epoch_budget", 0)),
         lr=float(train_cfg_raw.get("lr", 5e-5)),
         val_split=float(train_cfg_raw.get("val_split", 0.1)),
         log_every=int(train_cfg_raw.get("log_every", 4)),
@@ -413,6 +413,7 @@ def main():
         timestep_curriculum=timestep_curriculum_cfg,
         lr_decay_rate=float(train_cfg_raw.get("lr_decay_rate", 0.0)),
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
+        freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))

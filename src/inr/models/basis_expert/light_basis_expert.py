@@ -183,7 +183,7 @@ class LightBasisExpert(nn.Module):
     def pretrain_parameters(self):
         return list(self.gating.parameters()) + list(self.view_embedding.parameters())
 
-    def pretrain_teacher_shared_feat(self, coords: torch.Tensor, teacher_mode: str = "uniform"):
+    def pretrain_teacher_shared_feat(self, coords: torch.Tensor, teacher_mode: str = "random_topk"):
         x_pe = self.pos_enc(coords)
         expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
         mode = (teacher_mode or "uniform").strip().lower()
