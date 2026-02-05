@@ -18,7 +18,7 @@ from inr.datasets.volumetric import (
     make_singletarget_collate,
 )
 from inr.training.losses import diversity_loss, load_balance_loss, orth_loss, reconstruction_loss
-from inr.pretrain.voxel_clustering import compute_voxel_cluster_assignments
+from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
 try:
@@ -58,6 +58,19 @@ class PretrainConfig:
     cluster_num_time_samples: int = 16
     cluster_seed: int = 42
     assignments_cache_path: str = ""
+    assignments_method: str = "voxel_clustering"
+    spatial_blocks: Optional[Tuple[int, int, int]] = None
+    time_block_size: int = 0
+    mode: str = "router_classification"
+    stage1_epochs: int = 0
+    stage2_epochs: int = 0
+    stage1_gam_div: float = 1e-4
+    stage1_gam_orth: float = 1e-4
+    stage1_orth_eps: float = 1e-6
+    stage1_div_sigma: float = 1.0
+    stage2_entropy_weight: float = 0.0
+    stage2_lam_eq: float = 0.0
+    stage2_temperature: float = 1.0
 
 
 @dataclass
@@ -321,35 +334,169 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     )
 
 
+def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> DataLoader:
+    base_ds = _resolve_base_dataset(dataset)
+    if isinstance(base_ds, MultiTargetVolumetricDataset):
+        collate_fn = make_multitarget_collate(base_ds, read_targets=False)
+    elif isinstance(base_ds, VolumetricDataset):
+        collate_fn = make_singletarget_collate(base_ds, read_targets=False)
+    else:
+        raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
+
+    pretrain_kwargs = {
+        "pin_memory": True,
+        "num_workers": cfg.num_workers,
+        "persistent_workers": cfg.num_workers > 0,
+        "collate_fn": collate_fn,
+    }
+    if cfg.num_workers > 0:
+        pretrain_kwargs["prefetch_factor"] = 4
+    return DataLoader(
+        dataset,
+        batch_size=cfg.pretrain.batch_size,
+        shuffle=True,
+        **pretrain_kwargs,
+    )
+
+
 def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig, device: torch.device):
-    if not cfg.pretrain.enabled or cfg.pretrain.epochs <= 0:
+    if not cfg.pretrain.enabled:
+        return
+    mode = str(cfg.pretrain.mode).strip().lower()
+    if mode != "basis_two_stage" and cfg.pretrain.epochs <= 0:
         return
     if cfg.pretrain.batch_size <= 0:
         raise ValueError("pretrain.batch_size must be positive")
-    if cfg.pretrain.cluster_num_time_samples <= 0:
-        raise ValueError("pretrain.cluster_num_time_samples must be positive")
-    if not (hasattr(model, "encoder") and hasattr(model, "policy") and hasattr(model, "experts")):
-        raise ValueError("Pretrain requires model.encoder, model.policy, and model.experts")
+    if str(cfg.pretrain.assignments_method).strip().lower() in {"voxel_clustering", "clustering", "kmeans"}:
+        if cfg.pretrain.cluster_num_time_samples <= 0:
+            raise ValueError("pretrain.cluster_num_time_samples must be positive")
+    if not hasattr(model, "num_experts"):
+        raise ValueError("Pretrain requires model.num_experts")
     num_experts = getattr(model, "num_experts", None)
     if num_experts is None:
         raise ValueError("Pretrain requires model.num_experts")
 
     base_ds = _resolve_base_dataset(dataset)
-    assignments = compute_voxel_cluster_assignments(
+    if mode == "basis_two_stage":
+        stage1_epochs = int(cfg.pretrain.stage1_epochs)
+        stage2_epochs = int(cfg.pretrain.stage2_epochs)
+        if stage1_epochs <= 0 and stage2_epochs <= 0:
+            raise ValueError("basis_two_stage requires stage1_epochs and/or stage2_epochs > 0")
+
+        coord_loader = _build_pretrain_coords_loader(dataset, cfg)
+
+        if stage1_epochs > 0:
+            if not hasattr(model, "pretrain_stage1_parameters") or not callable(getattr(model, "pretrain_stage1_parameters")):
+                raise ValueError("basis_two_stage requires model.pretrain_stage1_parameters()")
+            if not hasattr(model, "pretrain_stage1_expert_feats") or not callable(getattr(model, "pretrain_stage1_expert_feats")):
+                raise ValueError("basis_two_stage requires model.pretrain_stage1_expert_feats(x)")
+            opt = torch.optim.Adam(
+                list(model.pretrain_stage1_parameters()),
+                lr=cfg.pretrain.lr,
+                betas=(0.9, 0.999),
+            )
+            start_time = time.time()
+            for epoch in range(1, stage1_epochs + 1):
+                model.train()
+                epoch_loss = 0.0
+                steps = 0
+                iterator = coord_loader
+                if tqdm is not None:
+                    iterator = tqdm(coord_loader, desc=f"pretrain_s1 {epoch}/{stage1_epochs}", leave=False)
+                for xb in iterator:
+                    xb = xb.to(device)
+                    expert_feats = model.pretrain_stage1_expert_feats(xb)
+                    loss_div = diversity_loss(expert_feats, sigma=cfg.pretrain.stage1_div_sigma)
+                    loss_orth = orth_loss(expert_feats, eps=cfg.pretrain.stage1_orth_eps)
+                    loss = cfg.pretrain.stage1_gam_div * loss_div + cfg.pretrain.stage1_gam_orth * loss_orth
+                    opt.zero_grad()
+                    loss.backward()
+                    opt.step()
+                    epoch_loss += loss.item()
+                    steps += 1
+                epoch_loss /= max(steps, 1)
+                elapsed = time.time() - start_time
+                print(
+                    f"Pretrain stage1 {epoch}/{stage1_epochs} "
+                    f"loss={epoch_loss:.6e} div={loss_div.item():.3e} orth={loss_orth.item():.3e} time={elapsed:.1f}s"
+                )
+
+        if stage2_epochs > 0:
+            if not hasattr(model, "pretrain_stage2_parameters") or not callable(getattr(model, "pretrain_stage2_parameters")):
+                raise ValueError("basis_two_stage requires model.pretrain_stage2_parameters()")
+            if not hasattr(model, "pretrain_stage2_router") or not callable(getattr(model, "pretrain_stage2_router")):
+                raise ValueError("basis_two_stage requires model.pretrain_stage2_router(x)")
+            opt = torch.optim.Adam(
+                list(model.pretrain_stage2_parameters()),
+                lr=cfg.pretrain.lr,
+                betas=(0.9, 0.999),
+            )
+            start_time = time.time()
+            for epoch in range(1, stage2_epochs + 1):
+                model.train()
+                epoch_loss = 0.0
+                steps = 0
+                iterator = coord_loader
+                if tqdm is not None:
+                    iterator = tqdm(coord_loader, desc=f"pretrain_s2 {epoch}/{stage2_epochs}", leave=False)
+                for xb in iterator:
+                    xb = xb.to(device)
+                    if not hasattr(model, "pretrain_teacher_shared_feat") or not callable(getattr(model, "pretrain_teacher_shared_feat")):
+                        raise ValueError("basis_two_stage requires model.pretrain_teacher_shared_feat(x)")
+                    shared_teacher = model.pretrain_teacher_shared_feat(xb).detach()
+                    probs, masks, expert_feats = model.pretrain_stage2_router(
+                        xb,
+                        temperature=cfg.pretrain.stage2_temperature,
+                    )
+                    expert_feats = expert_feats.detach()
+                    h_router = torch.sum(probs.unsqueeze(-1) * expert_feats.unsqueeze(1), dim=2)  # (B, V, F)
+                    bsz, num_views, feat_dim = h_router.shape
+                    shared_router = model.decoder(h_router.reshape(-1, feat_dim)).reshape(bsz, num_views, -1)
+                    shared_teacher_exp = shared_teacher.unsqueeze(1).expand_as(shared_router)
+                    loss_recon = F.mse_loss(shared_router, shared_teacher_exp)
+                    loss = loss_recon
+                    if cfg.pretrain.stage2_entropy_weight > 0.0:
+                        eps = 1e-9
+                        ent = -(probs * (probs + eps).log()).sum(dim=-1).mean()
+                        loss = loss - cfg.pretrain.stage2_entropy_weight * ent
+                    if cfg.pretrain.stage2_lam_eq > 0.0:
+                        loss_eq = load_balance_loss(probs, masks)
+                        loss = loss + cfg.pretrain.stage2_lam_eq * loss_eq
+                    opt.zero_grad()
+                    loss.backward()
+                    opt.step()
+                    epoch_loss += loss.item()
+                    steps += 1
+                epoch_loss /= max(steps, 1)
+                elapsed = time.time() - start_time
+                print(
+                    f"Pretrain stage2 {epoch}/{stage2_epochs} "
+                    f"loss={epoch_loss:.6e} time={elapsed:.1f}s"
+                )
+        return
+
+    assignments_cfg = PretrainAssignmentConfig(
+        method=cfg.pretrain.assignments_method,
+        seed=int(cfg.pretrain.cluster_seed),
+        cache_path=str(cfg.pretrain.assignments_cache_path or ""),
+        cluster_num_time_samples=int(cfg.pretrain.cluster_num_time_samples),
+        spatial_blocks=cfg.pretrain.spatial_blocks,
+        time_block_size=int(cfg.pretrain.time_block_size),
+    )
+    assignments = compute_pretrain_assignments(
         base_ds,
         num_experts=int(num_experts),
-        num_time_samples=int(cfg.pretrain.cluster_num_time_samples),
-        seed=int(cfg.pretrain.cluster_seed),
-        cache_path=cfg.pretrain.assignments_cache_path or None,
+        cfg=assignments_cfg,
     )
     pretrain_loader = _build_pretrain_loader(dataset, cfg, assignments)
 
-    expert_flags = [p.requires_grad for p in model.experts.parameters()]
-    for p in model.experts.parameters():
-        p.requires_grad = False
+    if hasattr(model, "pretrain_parameters") and callable(getattr(model, "pretrain_parameters")):
+        pretrain_params = list(model.pretrain_parameters())
+    else:
+        raise ValueError("Pretrain requires model.pretrain_parameters()")
 
     opt = torch.optim.Adam(
-        list(model.encoder.parameters()) + list(model.policy.parameters()),
+        pretrain_params,
         lr=cfg.pretrain.lr,
         betas=(0.9, 0.999),
     )
@@ -367,8 +514,10 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
         for xb, expert_id in iterator:
             xb = xb.to(device)
             expert_id = expert_id.to(device)
-            enc_feat = model.encoder(xb)
-            _, logits, _ = model.policy(xb, enc_feat)
+            if hasattr(model, "pretrain_forward") and callable(getattr(model, "pretrain_forward")):
+                logits = model.pretrain_forward(xb)
+            else:
+                raise ValueError("Pretrain requires model.pretrain_forward(x)")
             loss = F.cross_entropy(logits, expert_id)
             opt.zero_grad()
             loss.backward()
@@ -388,9 +537,6 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
             f"loss={epoch_loss:.6e} acc={acc:.4f} "
             f"counts={counts.tolist()} time={elapsed:.1f}s"
         )
-
-    for p, flag in zip(model.experts.parameters(), expert_flags):
-        p.requires_grad = flag
 
 
 def build_dataloaders(

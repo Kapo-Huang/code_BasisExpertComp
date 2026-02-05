@@ -350,6 +350,19 @@ def main():
         cluster_num_time_samples=int(pretrain_raw.get("cluster_num_time_samples", 16)),
         cluster_seed=int(pretrain_raw.get("cluster_seed", train_cfg_raw.get("seed", 42))),
         assignments_cache_path=str(pretrain_raw.get("assignments_cache_path", "")),
+        assignments_method=str(pretrain_raw.get("assignments_method", "voxel_clustering")),
+        spatial_blocks=tuple(pretrain_raw.get("spatial_blocks", [])) or None,
+        time_block_size=int(pretrain_raw.get("time_block_size", 0)),
+        mode=str(pretrain_raw.get("mode", "router_classification")),
+        stage1_epochs=int(pretrain_raw.get("stage1_epochs", 0)),
+        stage2_epochs=int(pretrain_raw.get("stage2_epochs", 0)),
+        stage1_gam_div=float(pretrain_raw.get("stage1_gam_div", 1e-4)),
+        stage1_gam_orth=float(pretrain_raw.get("stage1_gam_orth", 1e-4)),
+        stage1_orth_eps=float(pretrain_raw.get("stage1_orth_eps", 1e-6)),
+        stage1_div_sigma=float(pretrain_raw.get("stage1_div_sigma", 1.0)),
+        stage2_entropy_weight=float(pretrain_raw.get("stage2_entropy_weight", 0.0)),
+        stage2_lam_eq=float(pretrain_raw.get("stage2_lam_eq", 0.0)),
+        stage2_temperature=float(pretrain_raw.get("stage2_temperature", 1.0)),
     )
 
     timestep_curriculum_raw = train_cfg_raw.get("timestep_curriculum", {}) or {}

@@ -333,6 +333,14 @@ class MoEINR(nn.Module):
             return y, preds_all, probs, logits
         return y
 
+    def pretrain_forward(self, x: torch.Tensor) -> torch.Tensor:
+        enc_feat = self.encoder(x)
+        _, logits, _ = self.policy(x, enc_feat)
+        return logits
+
+    def pretrain_parameters(self):
+        return list(self.encoder.parameters()) + list(self.policy.parameters())
+
 
 def build_moe_inr_from_config(cfg) -> MoEINR:
     """Helper to construct MoEINR from a plain dict/YAML config."""

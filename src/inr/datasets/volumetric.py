@@ -284,9 +284,13 @@ def _singletarget_collate(
         if assignments is None:
             raise ValueError("assignments must be provided when return_expert_id=True")
         V = X * Y * Z
-        assert assignments.shape == (V,)
-        v = x + X * (y + Y * z)
-        expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+        if assignments.shape == (V,):
+            v = x + X * (y + Y * z)
+            expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+        elif assignments.shape == (int(dataset.volume_shape.T),):
+            expert_id = torch.from_numpy(assignments[t]).to(torch.long)
+        else:
+            raise ValueError(f"assignments must have shape (V,) or (T,), got {assignments.shape}")
 
     if not read_targets:
         if return_expert_id:
@@ -333,9 +337,13 @@ def _multitarget_collate(
         if assignments is None:
             raise ValueError("assignments must be provided when return_expert_id=True")
         V = X * Y * Z
-        assert assignments.shape == (V,)
-        v = x + X * (y + Y * z)
-        expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+        if assignments.shape == (V,):
+            v = x + X * (y + Y * z)
+            expert_id = torch.from_numpy(assignments[v]).to(torch.long)
+        elif assignments.shape == (int(dataset.volume_shape.T),):
+            expert_id = torch.from_numpy(assignments[t]).to(torch.long)
+        else:
+            raise ValueError(f"assignments must have shape (V,) or (T,), got {assignments.shape}")
 
     if not read_targets:
         if return_expert_id:
@@ -374,7 +382,9 @@ def make_singletarget_collate(
         V = X * Y * Z
         if assignments is None:
             raise ValueError("assignments must be provided when return_expert_id=True")
-        assert assignments.shape == (V,)
+        T = int(dataset.volume_shape.T)
+        if assignments.shape not in {(V,), (T,)}:
+            raise ValueError(f"assignments must have shape (V,) or (T,), got {assignments.shape}")
     return partial(
         _singletarget_collate,
         dataset=dataset,
@@ -399,7 +409,9 @@ def make_multitarget_collate(
         V = X * Y * Z
         if assignments is None:
             raise ValueError("assignments must be provided when return_expert_id=True")
-        assert assignments.shape == (V,)
+        T = int(dataset.volume_shape.T)
+        if assignments.shape not in {(V,), (T,)}:
+            raise ValueError(f"assignments must have shape (V,) or (T,), got {assignments.shape}")
     return partial(
         _multitarget_collate,
         dataset=dataset,
