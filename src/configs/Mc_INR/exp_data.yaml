@@ -1,0 +1,55 @@
+experiment: exp_mc_inr_xyzt_to_multivar
+exp_id: mcinr-sukong-cell-multivar
+experiment_root: experiments
+
+data:
+  dataset_name: sukong
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/sukong/train_subset/source_cell_XYZT.npy
+  attr_paths:
+    target_E: ./data/raw/sukong/train_subset/targets_cell_E.npy
+    target_E_IntegrationPoints: ./data/raw/sukong/train_subset/target_cell_E_IntegrationPoints.npy
+    target_S: ./data/raw/sukong/train/targets_cell_S.npy
+    target_S_IntegrationPoints: ./data/raw/sukong/train/target_cell_S_IntegrationPoints.npy
+  normalize: true
+
+model:
+  name: mc_inr
+  hidden_features: 256
+  gfe_layers: 5
+  lfe_layers: 6
+
+training:
+  num_workers: 4
+  epochs: 200
+  batch_size: 50000
+  lr: 5.0e-5
+  lr_decay_step: 30
+  lr_decay_gamma: 0.92
+  log_every: 10
+  save_every: 20
+  seed: 42
+  device: cuda
+
+  # clustering + meta stage
+  initial_k: 20
+  sampling_ratio: 0.3
+  split_threshold: 5.0e-4
+  split_check_interval: 30
+  min_split_points: 2
+  max_recluster_rounds: 8
+
+  # convergence
+  convergence_patience: 30
+  convergence_delta: 0.0
+
+  # stage-2 full-data fine-tuning
+  finetune_epochs: 400
+  finetune_lr: 5.0e-5
+  split_after_meta: false
+  resume_path: null
+
+  # optional explicit output paths (if omitted, auto-generated under experiments/<exp_id>/...)
+  save_model: experiments/mcinr-sukong-cell-multivar/checkpoints/mcinr-sukong-cell-multivar.pth
+  save_pred: experiments/mcinr-sukong-cell-multivar/predictions/mcinr-sukong-cell-multivar-full.npy

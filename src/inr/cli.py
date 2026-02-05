@@ -24,7 +24,7 @@ def build_model(model_cfg, dataset=None):
     if name in {"moe_inr", "moeinr", "moe-inr"}:
         return build_moe_inr_from_config(model_cfg)
     if name in {"moe_inr_multiview", "moeinr_multiview", "moe-inr-multiview"}:
-        from inr.models.moe_inr_multiview import build_moe_inr_multiview_from_config
+        from inr.models.sota.moe_inr import build_moe_inr_multiview_from_config
         if dataset is None or not hasattr(dataset, "view_specs"):
             raise ValueError("moe_inr_multiview requires a MultiViewCoordDataset with view_specs().")
         return build_moe_inr_multiview_from_config(model_cfg, dataset.view_specs())

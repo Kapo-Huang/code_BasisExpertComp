@@ -13,6 +13,7 @@ PYTHONPATH=src python -m inr.cli --config configs/exp1.yaml
 PYTHONPATH=src python -m inr.cli --config configs/exp3.yaml
 PYTHONPATH=src python -m inr.cli --config configs/exp4_resnet.yaml
 PYTHONPATH=src python -m inr.cli --config configs/exp6.yaml  # MoE-INR on XYZT->E
+PYTHONPATH=src python -m inr.mc_cli --config configs/Mc_INR/exp_data.yaml # Mc-INR
 ```
 
 On PowerShell:
@@ -30,8 +31,12 @@ Outputs and checkpoints are written under `outputs/` by default. Override paths 
 - `src/inr/data.py` — reusable `NodeDataset` with normalization + denorm helpers.
 - `src/inr/models/` — `siren.py` (vanilla) and `siren_resnet.py` (Exp4 architecture).
 - `src/inr/training/loops.py` — train/val loop, checkpointing, full-field prediction.
+- `src/inr/training/mc_full_finetuning.py` - train loop for mc-inr full finetune
+- `src/inr/training/mc_meta.py` - train loop for mc-inr meta-learning
+- `src/inr/training/mc_train_pipeline.py` - train pipeline for mc-inr
 - `src/inr/utils/io.py` — checkpoint utilities.
 - `src/inr/cli.py` — CLI entrypoint that loads a config, builds dataset/model, trains and predicts.
+- `src/inr/mc_cli.py` — CLI specifically designed for MC-INR.
 
 ## Config fields
 
