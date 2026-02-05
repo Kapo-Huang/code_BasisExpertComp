@@ -1,11 +1,16 @@
 import argparse
+import logging
 from pathlib import Path
 
 from .evaluator import validate_experiment
 from .io_utils import append_csv_row, collect_experiments
+from inr.utils.logging_utils import setup_logging
+
+logger = logging.getLogger(__name__)
 
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser(description="Validate experiment results and generate plots.")
     parser.add_argument("--experiments", type=str, default="experiments", help="experiments root directory")
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
@@ -147,11 +152,11 @@ def main():
         )
         for row in rows:
             append_csv_row(csv_path, row, fieldnames)
-        print(f"Validated {exp_dir.name}")
+        logger.info("Validated %s", exp_dir.name)
         for pred_img, cmp_img, row in zip(pred_imgs, cmp_imgs, rows):
-            print(f"  Attr: {row.get('attr_name', '')}")
-            print(f"  Pred plot: {pred_img}")
-            print(f"  Compare plot: {cmp_img}")
+            logger.info("  Attr: %s", row.get("attr_name", ""))
+            logger.info("  Pred plot: %s", pred_img)
+            logger.info("  Compare plot: %s", cmp_img)
 
 
 if __name__ == "__main__":

@@ -1,9 +1,11 @@
+import logging
 import os
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
 
+logger = logging.getLogger(__name__)
 
 def ensure_dir(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
@@ -27,7 +29,7 @@ def save_checkpoint(model: torch.nn.Module, dataset, path: str, suffix: str = ""
         "y_std": _to_numpy(getattr(dataset, "y_std", None)),
     }
     torch.save(payload, save_path)
-    print(f"Saved checkpoint to {save_path}")
+    logger.info("Saved checkpoint to %s", save_path)
 
 
 def load_checkpoint(path: str, model: torch.nn.Module):

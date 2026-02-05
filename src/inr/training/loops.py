@@ -1,4 +1,5 @@
 import copy
+import logging
 import os
 import sys
 import time
@@ -25,6 +26,8 @@ try:
     from tqdm import tqdm as _tqdm
 except Exception:
     _tqdm = None
+
+logger = logging.getLogger(__name__)
 
 
 def _resolve_tqdm():
@@ -318,6 +321,15 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     else:
         raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
 
+    sampler = None
+    shuffle = True
+    if cfg.batches_per_timestep > 0:
+        if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
+            raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
+        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.pretrain.batch_size)
+        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, samples_per_timestep)
+        shuffle = False
+
     pretrain_kwargs = {
         "pin_memory": True,
         "num_workers": cfg.num_workers,
@@ -329,7 +341,8 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     return DataLoader(
         dataset,
         batch_size=cfg.pretrain.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         **pretrain_kwargs,
     )
 
@@ -343,6 +356,15 @@ def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> Data
     else:
         raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
 
+    sampler = None
+    shuffle = True
+    if cfg.batches_per_timestep > 0:
+        if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
+            raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
+        samples_per_timestep = int(cfg.batches_per_timestep) * int(cfg.pretrain.batch_size)
+        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, samples_per_timestep)
+        shuffle = False
+
     pretrain_kwargs = {
         "pin_memory": True,
         "num_workers": cfg.num_workers,
@@ -354,7 +376,8 @@ def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> Data
     return DataLoader(
         dataset,
         batch_size=cfg.pretrain.batch_size,
-        shuffle=True,
+        shuffle=shuffle,
+        sampler=sampler,
         **pretrain_kwargs,
     )
 
@@ -416,9 +439,14 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
                     steps += 1
                 epoch_loss /= max(steps, 1)
                 elapsed = time.time() - start_time
-                print(
-                    f"Pretrain stage1 {epoch}/{stage1_epochs} "
-                    f"loss={epoch_loss:.6e} div={loss_div.item():.3e} orth={loss_orth.item():.3e} time={elapsed:.1f}s"
+                logger.info(
+                    "Pretrain stage1 %s/%s loss=%.6e div=%.3e orth=%.3e time=%.1fs",
+                    epoch,
+                    stage1_epochs,
+                    epoch_loss,
+                    loss_div.item(),
+                    loss_orth.item(),
+                    elapsed,
                 )
 
         if stage2_epochs > 0:
@@ -469,9 +497,12 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
                     steps += 1
                 epoch_loss /= max(steps, 1)
                 elapsed = time.time() - start_time
-                print(
-                    f"Pretrain stage2 {epoch}/{stage2_epochs} "
-                    f"loss={epoch_loss:.6e} time={elapsed:.1f}s"
+                logger.info(
+                    "Pretrain stage2 %s/%s loss=%.6e time=%.1fs",
+                    epoch,
+                    stage2_epochs,
+                    epoch_loss,
+                    elapsed,
                 )
         return
 
@@ -532,10 +563,14 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
         epoch_loss /= max(total, 1)
         acc = correct / max(total, 1)
         elapsed = time.time() - start_time
-        print(
-            f"Pretrain epoch {epoch}/{cfg.pretrain.epochs} "
-            f"loss={epoch_loss:.6e} acc={acc:.4f} "
-            f"counts={counts.tolist()} time={elapsed:.1f}s"
+        logger.info(
+            "Pretrain epoch %s/%s loss=%.6e acc=%.4f counts=%s time=%.1fs",
+            epoch,
+            cfg.pretrain.epochs,
+            epoch_loss,
+            acc,
+            counts.tolist(),
+            elapsed,
         )
 
 
@@ -595,7 +630,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     device = torch.device(cfg.device or ("cuda" if torch.cuda.is_available() else "cpu"))
     t0 = time.perf_counter()
     train_loader, val_loader, train_ds, val_ds = build_dataloaders(dataset, cfg)
-    print(f"DataLoader build: {time.perf_counter() - t0:.2f}s")
+    logger.info("DataLoader build: %.2fs", time.perf_counter() - t0)
     is_multiview = hasattr(dataset, "view_specs")
     psnr_collate = _resolve_collate(dataset)
     psnr_kwargs = {
@@ -635,7 +670,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         if cfg.lr_decay_step > 0 and cfg.lr_decay_rate > 0.0:
             steps = (epoch - 1) // int(cfg.lr_decay_step)
             lr = float(cfg.lr) * (float(cfg.lr_decay_rate) ** steps)
-            print(f"Epoch {epoch}: setting learning rate to {lr:.6e}")
+            logger.info("Epoch %s: setting learning rate to %.6e", epoch, lr)
             for group in optim.param_groups:
                 group["lr"] = lr
         if cfg.timestep_curriculum.enabled and timestep_sampler is not None:
@@ -645,13 +680,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 )
                 timestep_sampler.set_active_indices(active_indices)
                 if last_stride_groups != active_groups:
-                    print(f"Curriculum stride groups: {active_groups}/{group_total}")
+                    logger.info("Curriculum stride groups: %s/%s", active_groups, group_total)
                     last_stride_groups = active_groups
             else:
                 active_timesteps = _resolve_curriculum_timesteps(cfg, epoch, total_timesteps)
                 timestep_sampler.set_active_timesteps(active_timesteps)
                 if last_active_timesteps != active_timesteps:
-                    print(f"Curriculum timesteps: {active_timesteps}/{total_timesteps}")
+                    logger.info("Curriculum timesteps: %s/%s", active_timesteps, total_timesteps)
                     last_active_timesteps = active_timesteps
         model.train()
         epoch_loss = 0.0
@@ -721,27 +756,50 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 no_improve += 1
             if cfg.early_stop_patience and no_improve >= cfg.early_stop_patience:
                 elapsed = time.time() - start_time
-                print(
-                    f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} "
-                    f"val={val_loss:.6e} time={elapsed:.1f}s (early stop)"
+                logger.info(
+                    "Epoch %s/%s train=%.6e val=%.6e time=%.1fs (early stop)",
+                    epoch,
+                    cfg.epochs,
+                    epoch_loss,
+                    val_loss,
+                    elapsed,
                 )
                 break
 
         if epoch % cfg.log_every == 0 or epoch == 1:
             elapsed = time.time() - start_time
             if not is_multiview:
-                print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} time={elapsed:.1f}s")
+                logger.info(
+                    "Epoch %s/%s train=%.6e time=%.1fs",
+                    epoch,
+                    cfg.epochs,
+                    epoch_loss,
+                    elapsed,
+                )
             else:
                 if val_loss is None:
-                    print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} time={elapsed:.1f}s")
+                    logger.info(
+                        "Epoch %s/%s train=%.6e time=%.1fs",
+                        epoch,
+                        cfg.epochs,
+                        epoch_loss,
+                        elapsed,
+                    )
                 else:
-                    print(f"Epoch {epoch}/{cfg.epochs} train={epoch_loss:.6e} val={val_loss:.6e} time={elapsed:.1f}s")
+                    logger.info(
+                        "Epoch %s/%s train=%.6e val=%.6e time=%.1fs",
+                        epoch,
+                        cfg.epochs,
+                        epoch_loss,
+                        val_loss,
+                        elapsed,
+                    )
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(
                     f"E{i}={count} ({count / sumCount:.2%})" for i, count in enumerate(expert_select_counts.tolist())
                 )
-                print(f"Expert utilization rate: {counts_text}")
+                logger.info("Expert utilization rate: %s", counts_text)
                 expert_select_counts = torch.zeros_like(expert_select_counts)
         if (cfg.log_psnr_every > 0 and (epoch % cfg.log_psnr_every == 0)):
             psnr_ds = dataset
@@ -778,7 +836,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 data_range = data_range if data_range > 0 else 1.0
                 psnr_val = psnr(gt_denorm.numpy(), pred_denorm.numpy(), data_range=data_range)
                 elapsed = time.time() - start_time
-                print(f"PSNR epoch {epoch}/{cfg.epochs}: {psnr_val:.2f} time={elapsed:.1f}s")
+                logger.info(
+                    "PSNR epoch %s/%s: %.2f time=%.1fs",
+                    epoch,
+                    cfg.epochs,
+                    psnr_val,
+                    elapsed,
+                )
             elif is_multiview:
                 with torch.no_grad():
                     pred_dict = {}
@@ -808,7 +872,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     psnr_parts.append(f"{name}={psnr_val:.2f}")
                 psnr_text = " ".join(psnr_parts)
                 elapsed = time.time() - start_time
-                print(f"PSNR epoch {epoch}/{cfg.epochs}: {psnr_text} time={elapsed:.1f}s")
+                logger.info(
+                    "PSNR epoch %s/%s: %s time=%.1fs",
+                    epoch,
+                    cfg.epochs,
+                    psnr_text,
+                    elapsed,
+                )
         # if epoch % cfg.log_every == 0 or epoch == 1:
         #     print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:

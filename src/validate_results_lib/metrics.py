@@ -1,3 +1,4 @@
+import logging
 import math
 from typing import List, Optional, Tuple
 
@@ -5,6 +6,8 @@ import numpy as np
 from skimage.metrics import peak_signal_noise_ratio as skimage_psnr
 
 EPS = 1e-12
+
+logger = logging.getLogger(__name__)
 
 
 def compute_psnr(gt, pred):
@@ -47,9 +50,11 @@ def split_frames(arr: np.ndarray, n_frames: int) -> List[np.ndarray]:
         step = total // n_frames
         return [a[i * step : (i + 1) * step] for i in range(n_frames)]
 
-    print(
-        f"[WARN] total points {total} not divisible by n_frames={n_frames}. "
-        "Falling back to np.array_split -> unequal frame sizes may affect metrics."
+    logger.warning(
+        "total points %s not divisible by n_frames=%s. "
+        "Falling back to np.array_split -> unequal frame sizes may affect metrics.",
+        total,
+        n_frames,
     )
     return list(np.array_split(a, n_frames, axis=0))
 

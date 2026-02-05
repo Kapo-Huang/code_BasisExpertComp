@@ -1,3 +1,4 @@
+import logging
 import time
 from pathlib import Path
 
@@ -23,6 +24,8 @@ from .metrics import (
 )
 from .plotting import plot_pred_vs_gt, plot_rel_error_series
 
+logger = logging.getLogger(__name__)
+
 
 def validate_experiment(
     exp_dir: Path,
@@ -44,16 +47,24 @@ def validate_experiment(
     t_start = time.perf_counter()
     cfg_path = exp_dir / "configs" / "config.yaml"
     cfg = load_yaml(cfg_path)
-    print(f"[{exp_dir.name}] Stage: load config = {time.perf_counter() - t_start:.3f}s")
+    logger.info("[%s] Stage: load config = %.3fs", exp_dir.name, time.perf_counter() - t_start)
 
     t_stage = time.perf_counter()
     pred_files = sorted((exp_dir / "predictions").glob("*.npy"))
-    print(f"[{exp_dir.name}] Stage: find prediction file = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: find prediction file = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     ckpt_files = sorted((exp_dir / "checkpoints").glob("*.pth"))
     ckpt_path = match_checkpoint(epoch, ckpt_files)
-    print(f"[{exp_dir.name}] Stage: find checkpoint file = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: find checkpoint file = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     gt_paths = resolve_gt_paths(cfg)
@@ -62,12 +73,16 @@ def validate_experiment(
     for name, gt_path in gt_paths.items():
         if gt_path is None or not gt_path.exists():
             raise FileNotFoundError(f"GT not found for {exp_dir} ({name})")
-    print(f"[{exp_dir.name}] Stage: resolve GT path = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: resolve GT path = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     model_size = ckpt_path.stat().st_size if ckpt_path is not None else None
     param_count = count_params_from_ckpt(ckpt_path) if ckpt_path is not None else None
-    print(f"[{exp_dir.name}] Stage: model stats = {time.perf_counter() - t_stage:.3f}s")
+    logger.info("[%s] Stage: model stats = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     mesh_points = None
@@ -97,25 +112,45 @@ def validate_experiment(
             pred_path = pick_pred_for_attr(pred_files, epoch, attr_name)
         if pred_path is None:
             raise FileNotFoundError(f"No predictions found for {attr_name} epoch {epoch} in {exp_dir}")
-        print(f"[{exp_dir.name}] Stage: pick pred ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        logger.info(
+            "[%s] Stage: pick pred (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
+        )
 
         t_stage = time.perf_counter()
         gt = safe_load_npy(gt_path)
         pred = safe_load_npy(pred_path)
         if gt.shape != pred.shape:
             raise ValueError(f"GT and pred shape mismatch ({attr_name}): {gt.shape} vs {pred.shape}")
-        print(f"[{exp_dir.name}] Stage: load arrays ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        logger.info(
+            "[%s] Stage: load arrays (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
+        )
 
         t_stage = time.perf_counter()
         psnr_val = compute_psnr(gt, pred)
-        print(f"[{exp_dir.name}] Stage: compute PSNR ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        logger.info(
+            "[%s] Stage: compute PSNR (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
+        )
 
         t_stage = time.perf_counter()
         pred_frames = split_frames(pred, n_frames)
         gt_frames = split_frames(gt, n_frames)
         pred_series = [to_scalar(u) for u in pred_frames]
         gt_series = [to_scalar(u) for u in gt_frames]
-        print(f"[{exp_dir.name}] Stage: split series ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        logger.info(
+            "[%s] Stage: split series (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
+        )
 
         t_stage = time.perf_counter()
         tail_list = []
@@ -191,27 +226,44 @@ def validate_experiment(
                 }
             )
 
-        print(
-            f"[{exp_dir.name}] Stage: compute tail/hotspot/peak metrics ({attr_name}) = "
-            f"{time.perf_counter() - t_stage:.3f}s"
+        logger.info(
+            "[%s] Stage: compute tail/hotspot/peak metrics (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
         )
 
         t_stage = time.perf_counter()
         outdir.mkdir(parents=True, exist_ok=True)
         pred_img = outdir / f"{exp_dir.name}_{attr_name}_relerr_series_{pred_path.stem}.png"
         cmp_img = outdir / f"{exp_dir.name}_{attr_name}_pred_vs_gt_{pred_path.stem}.png"
-        print(f"[{exp_dir.name}] Stage: prepare outputs ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+        logger.info(
+            "[%s] Stage: prepare outputs (%s) = %.3fs",
+            exp_dir.name,
+            attr_name,
+            time.perf_counter() - t_stage,
+        )
 
         if mesh_path.exists():
             t_stage = time.perf_counter()
             plot_rel_error_series(
                 mesh_path, pred_series, gt_series, pred_img, img_scale, relerr_clip_percentile, relerr_max
             )
-            print(f"[{exp_dir.name}] Stage: plot rel error ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+            logger.info(
+                "[%s] Stage: plot rel error (%s) = %.3fs",
+                exp_dir.name,
+                attr_name,
+                time.perf_counter() - t_stage,
+            )
 
             t_stage = time.perf_counter()
             plot_pred_vs_gt(mesh_path, pred_series, gt_series, cmp_img, img_scale)
-            print(f"[{exp_dir.name}] Stage: plot pred vs gt ({attr_name}) = {time.perf_counter() - t_stage:.3f}s")
+            logger.info(
+                "[%s] Stage: plot pred vs gt (%s) = %.3fs",
+                exp_dir.name,
+                attr_name,
+                time.perf_counter() - t_stage,
+            )
 
         db_size = gt_path.stat().st_size
         cr = float(db_size / model_size) if model_size and model_size > 0 else None
@@ -235,5 +287,5 @@ def validate_experiment(
         pred_imgs.append(pred_img)
         cmp_imgs.append(cmp_img)
 
-    print(f"[{exp_dir.name}] Stage: total = {time.perf_counter() - t_start:.3f}s")
+    logger.info("[%s] Stage: total = %.3fs", exp_dir.name, time.perf_counter() - t_start)
     return rows, pred_imgs, cmp_imgs

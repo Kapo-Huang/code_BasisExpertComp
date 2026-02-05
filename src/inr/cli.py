@@ -1,4 +1,5 @@
 import argparse
+import logging
 import time
 from pathlib import Path
 
@@ -33,6 +34,9 @@ from inr.models.sota.stsr_inr import (
     build_stsr_inr_multiview_from_config,
 )
 from inr.training.loops import PretrainConfig, TimeStepCurriculumConfig, TrainingConfig, train_model
+from inr.utils.logging_utils import setup_logging
+
+logger = logging.getLogger(__name__)
 
 def parse_args():
     p = argparse.ArgumentParser(description="Train Implicit Neural Representations (SIREN variants)")
@@ -274,10 +278,11 @@ def _format_bytes_mb(num_bytes: int) -> str:
 
 
 def main():
+    setup_logging()
     args = parse_args()
     t0 = time.perf_counter()
     cfg = load_config(args.config)
-    print(f"Config load: {time.perf_counter() - t0:.2f}s")
+    logger.info("Config load: %.2fs", time.perf_counter() - t0)
 
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
@@ -285,18 +290,19 @@ def main():
 
     t1 = time.perf_counter()
     data_info = resolve_data_paths(data_cfg)
-    print(f"Resolve data paths: {time.perf_counter() - t1:.2f}s")
+    logger.info("Resolve data paths: %.2fs", time.perf_counter() - t1)
     exp_layout = build_experiment_layout(cfg, model_cfg, data_info)
+    setup_logging(log_dir=Path(exp_layout["exp_dir"]) / "logs")
 
     normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
     normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
     target_stats = None
     stats_path = data_cfg.get("target_stats_path")
     if stats_path and Path(stats_path).exists():
-        print(f"Loading target stats: {stats_path}")
+        logger.info("Loading target stats: %s", stats_path)
         target_stats = _load_target_stats(stats_path, attr_names=data_info.get("attr_paths"))
     elif stats_path and data_cfg.get("compute_target_stats", False):
-        print(f"Computing target stats: {stats_path}")
+        logger.info("Computing target stats: %s", stats_path)
         target_stats = _compute_target_stats(
             y_path=data_info.get("y_path"),
             attr_paths=data_info.get("attr_paths"),
@@ -316,7 +322,7 @@ def main():
             normalize_targets=normalize_targets,
             target_stats=target_stats,
         )
-        print(f"Dataset init (multi-target): {time.perf_counter() - t2:.2f}s")
+        logger.info("Dataset init (multi-target): %.2fs", time.perf_counter() - t2)
     else:
         t2 = time.perf_counter()
         dataset = VolumetricDataset(
@@ -326,20 +332,20 @@ def main():
             normalize_targets=normalize_targets,
             target_stats=target_stats,
         )
-        print(f"Dataset init (single-target): {time.perf_counter() - t2:.2f}s")
-    print(f"Dataset size: {len(dataset)} samples")
+        logger.info("Dataset init (single-target): %.2fs", time.perf_counter() - t2)
+    logger.info("Dataset size: %s samples", len(dataset))
     t3 = time.perf_counter()
     model = build_model(model_cfg, dataset)
     n_params = sum(p.numel() for p in model.parameters())
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     size_bytes = _model_size_bytes(model)
-    print(
-        "Model size: "
-        f"params={_format_num(n_params)} "
-        f"trainable={_format_num(n_trainable)} "
-        f"size={_format_bytes_mb(size_bytes)}"
+    logger.info(
+        "Model size: params=%s trainable=%s size=%s",
+        _format_num(n_params),
+        _format_num(n_trainable),
+        _format_bytes_mb(size_bytes),
     )
-    print(f"Model build: {time.perf_counter() - t3:.2f}s")
+    logger.info("Model build: %.2fs", time.perf_counter() - t3)
 
     pretrain_raw = train_cfg_raw.get("pretrain", {}) or {}
     pretrain_cfg = PretrainConfig(
@@ -409,7 +415,8 @@ def main():
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
     )
 
-    print("Train start.")
+    logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))
+    logger.info("Train start.")
     train_model(model, dataset, train_cfg)
 
 

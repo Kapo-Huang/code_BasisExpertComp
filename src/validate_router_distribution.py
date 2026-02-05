@@ -1,4 +1,5 @@
 import argparse
+import logging
 import math
 import time
 from pathlib import Path
@@ -12,8 +13,10 @@ from torch.utils.data import DataLoader
 
 from inr.cli import build_model, resolve_data_paths
 from inr.data import MultiTargetVolumetricDataset, VolumetricDataset
+from inr.utils.logging_utils import setup_logging
 from inr.utils.io import load_checkpoint
 
+logger = logging.getLogger(__name__)
 
 def _load_yaml(path: Path):
     with path.open("r", encoding="utf-8") as f:
@@ -147,14 +150,18 @@ def extract_router_distribution(
     t_start = time.perf_counter()
     cfg_path = exp_dir / "configs" / "config.yaml"
     cfg = _load_yaml(cfg_path)
-    print(f"[{exp_dir.name}] Stage: load config = {time.perf_counter() - t_start:.3f}s")
+    logger.info("[%s] Stage: load config = %.3fs", exp_dir.name, time.perf_counter() - t_start)
 
     t_stage = time.perf_counter()
     ckpt_files = sorted((exp_dir / "checkpoints").glob("*.pth"))
     ckpt_path = _match_checkpoint(epoch, ckpt_files)
     if ckpt_path is None:
         raise FileNotFoundError(f"No checkpoint found for epoch {epoch} in {exp_dir}")
-    print(f"[{exp_dir.name}] Stage: find checkpoint file = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: find checkpoint file = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     data_cfg = cfg["data"]
@@ -178,18 +185,23 @@ def extract_router_distribution(
         )
     cfg_in = int(model_cfg.get("in_features", 4))
     if cfg_in != 4:
-        print(
-            f"[{exp_dir.name}] Warning: model in_features={cfg_in} but volumetric coords are 4D; "
-            "overriding to 4."
+        logger.warning(
+            "[%s] model in_features=%s but volumetric coords are 4D; overriding to 4.",
+            exp_dir.name,
+            cfg_in,
         )
         model_cfg = dict(model_cfg)
         model_cfg["in_features"] = 4
     model = build_model(model_cfg, dataset)
-    print(f"[{exp_dir.name}] Stage: build model/dataset = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: build model/dataset = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     load_checkpoint(str(ckpt_path), model)
-    print(f"[{exp_dir.name}] Stage: load checkpoint = {time.perf_counter() - t_stage:.3f}s")
+    logger.info("[%s] Stage: load checkpoint = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     device = torch.device(device or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -197,7 +209,11 @@ def extract_router_distribution(
     model.eval()
     if force_soft and hasattr(model, "hard_routing_at_eval"):
         model.hard_routing_at_eval = False
-    print(f"[{exp_dir.name}] Stage: prepare device = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: prepare device = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     loader = DataLoader(
@@ -207,7 +223,7 @@ def extract_router_distribution(
         pin_memory=True,
         num_workers=4,
     )
-    print(f"[{exp_dir.name}] Stage: build loader = {time.perf_counter() - t_stage:.3f}s")
+    logger.info("[%s] Stage: build loader = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     expert_ids = []
@@ -219,7 +235,11 @@ def extract_router_distribution(
             idx = torch.argmax(probs, dim=-1)
             expert_ids.append(idx.cpu())
     expert_all = torch.cat(expert_ids, dim=0).numpy()
-    print(f"[{exp_dir.name}] Stage: router inference = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: router inference = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     t_stage = time.perf_counter()
     if n_frames <= 0:
@@ -227,19 +247,24 @@ def extract_router_distribution(
     expert_series = np.array_split(expert_all, n_frames)
     outdir.mkdir(parents=True, exist_ok=True)
     img_path = outdir / f"{exp_dir.name}_router_experts_epoch{epoch}.png"
-    print(f"[{exp_dir.name}] Stage: prepare outputs = {time.perf_counter() - t_stage:.3f}s")
+    logger.info(
+        "[%s] Stage: prepare outputs = %.3fs",
+        exp_dir.name,
+        time.perf_counter() - t_stage,
+    )
 
     if mesh_path.exists():
         t_stage = time.perf_counter()
         num_experts = int(getattr(model, "num_experts", np.max(expert_all) + 1))
         _plot_expert_series(mesh_path, expert_series, img_path, img_scale, num_experts)
-        print(f"[{exp_dir.name}] Stage: plot experts = {time.perf_counter() - t_stage:.3f}s")
+        logger.info("[%s] Stage: plot experts = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
 
-    print(f"[{exp_dir.name}] Stage: total = {time.perf_counter() - t_start:.3f}s")
+    logger.info("[%s] Stage: total = %.3fs", exp_dir.name, time.perf_counter() - t_start)
     return img_path
 
 
 def main():
+    setup_logging()
     parser = argparse.ArgumentParser(description="Visualize MoE router expert assignments on a mesh.")
     parser.add_argument("--experiments", type=str, default="experiments", help="experiments root directory")
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
@@ -278,8 +303,8 @@ def main():
             args.hard_routing,
             args.force_soft,
         )
-        print(f"Visualized {exp_dir.name}")
-        print(f"  Expert plot: {img_path}")
+        logger.info("Visualized %s", exp_dir.name)
+        logger.info("  Expert plot: %s", img_path)
 
 
 if __name__ == "__main__":
