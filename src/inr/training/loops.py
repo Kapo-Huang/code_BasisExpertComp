@@ -121,6 +121,7 @@ class TrainingConfig:
     lr_decay_rate: float = 0.0
     lr_decay_step: int = 0
     freeze_router_at: float = 0.8
+    hard_topk_warmup_epochs: int = 0
 
 
 def _unpack_batch(batch):
@@ -134,12 +135,22 @@ def _is_multiview_target(targets) -> bool:
     return isinstance(targets, dict)
 
 
-def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig, return_aux: bool = False):
+def _compute_multiview_loss(
+    model,
+    xb,
+    yb,
+    cfg: TrainingConfig,
+    return_aux: bool = False,
+    hard_topk: bool = True,
+):
     try:
-        preds, aux = model(xb, return_aux=True)
+        preds, aux = model(xb, return_aux=True, hard_topk=hard_topk)
     except TypeError:
-        preds = model(xb)
-        aux = {}
+        try:
+            preds, aux = model(xb, return_aux=True)
+        except TypeError:
+            preds = model(xb)
+            aux = {}
     loss_recon = reconstruction_loss(
         preds,
         yb,
@@ -732,6 +743,9 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             freeze_epoch = int(freeze_at)
 
     for epoch in range(1, cfg.epochs + 1):
+        hard_topk = True
+        if cfg.hard_topk_warmup_epochs > 0 and epoch <= int(cfg.hard_topk_warmup_epochs):
+            hard_topk = False
         if not router_frozen and freeze_epoch is not None and epoch >= freeze_epoch:
             frozen_params = _freeze_router_modules(model)
             logger.info("Freeze router modules at epoch %s (params frozen: %s)", epoch, frozen_params)
@@ -779,15 +793,18 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
                 loss, loss_recon, loss_eq, loss_div, loss_orth, aux = _compute_multiview_loss(
-                    model, xb, yb, cfg, return_aux=True
+                    model, xb, yb, cfg, return_aux=True, hard_topk=hard_topk
                 )
             else:
                 yb = yb.to(device, non_blocking=True)
                 try:
-                    pred, aux = model(xb, return_aux=True)
+                    pred, aux = model(xb, return_aux=True, hard_topk=hard_topk)
                 except TypeError:
-                    pred = model(xb)
-                    aux = {}
+                    try:
+                        pred, aux = model(xb, return_aux=True)
+                    except TypeError:
+                        pred = model(xb)
+                        aux = {}
                 loss = criterion(pred, yb)
                 loss_recon = loss
                 loss_eq = torch.zeros((), device=loss.device)
@@ -821,7 +838,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
 
         val_loss = None
         if val_loader is not None:
-            val_loss = evaluate(model, val_loader, criterion, device, len(val_ds), cfg)
+            val_loss = evaluate(model, val_loader, criterion, device, len(val_ds), cfg, hard_topk=hard_topk)
             if val_loss < best_val:
                 best_val = val_loss
                 best_state = copy.deepcopy(model.state_dict())
@@ -899,7 +916,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device, non_blocking=True)
-                        pred = model(xb)
+                        try:
+                            pred = model(xb, hard_topk=hard_topk)
+                        except TypeError:
+                            pred = model(xb)
                         preds.append(pred.cpu())
                         gts.append(yb)
                     pred_all = torch.cat(preds, dim=0)
@@ -927,7 +947,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     for batch in val_iter:
                         xb, yb = _unpack_batch(batch)
                         xb = xb.to(device, non_blocking=True)
-                        preds = model(xb)
+                        try:
+                            preds = model(xb, hard_topk=hard_topk)
+                        except TypeError:
+                            preds = model(xb)
                         for name, pred in preds.items():
                             pred_dict.setdefault(name, []).append(pred.cpu())
                         for name, target in yb.items():
@@ -965,7 +988,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     predict_full(model, dataset, cfg, device)
 
 
-def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConfig):
+def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConfig, hard_topk: bool = True):
     model.eval()
     loss_sum = 0.0
     with torch.no_grad():
@@ -977,10 +1000,13 @@ def evaluate(model, loader, criterion, device, n_samples: int, cfg: TrainingConf
             xb = xb.to(device)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device) for name, tensor in yb.items()}
-                loss, _, _, _, _ = _compute_multiview_loss(model, xb, yb, cfg)
+                loss, _, _, _, _ = _compute_multiview_loss(model, xb, yb, cfg, hard_topk=hard_topk)
             else:
                 yb = yb.to(device)
-                pred = model(xb)
+                try:
+                    pred = model(xb, hard_topk=hard_topk)
+                except TypeError:
+                    pred = model(xb)
                 loss = criterion(pred, yb)
             loss_sum += loss.item() * xb.shape[0]
     return loss_sum / n_samples

@@ -414,6 +414,7 @@ def main():
         lr_decay_rate=float(train_cfg_raw.get("lr_decay_rate", 0.0)),
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
+        hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))
