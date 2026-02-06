@@ -825,10 +825,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             epoch_loss += loss.item()
             steps_seen += 1
             # loss_orth is only for logging; zero if not used
-            if aux and "masks" in aux:
-                masks = aux["masks"].detach()
-                reduce_dims = tuple(range(masks.dim() - 1))
-                counts = masks.float().sum(dim=reduce_dims).to(torch.long).cpu()
+            if aux and "probs" in aux:
+                probs = aux["probs"].detach()
+                reduce_dims = tuple(range(probs.dim() - 1))
+                counts = probs.float().sum(dim=reduce_dims).cpu()
                 if expert_select_counts is None:
                     expert_select_counts = torch.zeros_like(counts)
                 expert_select_counts += counts
@@ -888,7 +888,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(
-                    f"E{i}={count} ({count / sumCount:.2%})" for i, count in enumerate(expert_select_counts.tolist())
+                    f"E{i}={count:.2f} ({count / sumCount:.2%})"
+                    for i, count in enumerate(expert_select_counts.tolist())
                 )
                 logger.info("Expert utilization rate: %s", counts_text)
                 expert_select_counts = torch.zeros_like(expert_select_counts)
