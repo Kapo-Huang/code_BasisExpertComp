@@ -20,7 +20,6 @@ model:
   num_experts: 7
   base_dim: 32
   top_k: 2
-  expert_use_positional_encoding: true
   expert_num_frequencies: 6
   expert_num_layers: 3
   gate_num_layers: 3

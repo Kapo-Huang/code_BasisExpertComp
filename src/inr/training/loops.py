@@ -6,7 +6,7 @@ import sys
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -19,7 +19,12 @@ from inr.datasets.volumetric import (
     make_multitarget_collate,
     make_singletarget_collate,
 )
-from inr.training.losses import diversity_loss, load_balance_loss, orth_loss, reconstruction_loss
+from inr.training.losses import (
+    diversity_loss,
+    load_balance_loss,
+    orth_loss,
+    reconstruction_loss_with_breakdown,
+)
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -122,6 +127,7 @@ class TrainingConfig:
     lr_decay_step: int = 0
     freeze_router_at: float = 0.8
     hard_topk_warmup_epochs: int = 0
+    multiview_recon_reduction: str = "attr_sum"
 
 
 def _unpack_batch(batch):
@@ -141,6 +147,7 @@ def _compute_multiview_loss(
     yb,
     cfg: TrainingConfig,
     return_aux: bool = False,
+    return_breakdown: bool = False,
     hard_topk: bool = True,
 ):
     try:
@@ -151,12 +158,19 @@ def _compute_multiview_loss(
         except TypeError:
             preds = model(xb)
             aux = {}
-    loss_recon = reconstruction_loss(
+    loss_recon_attr_sum, loss_recon_dim_norm, recon_details = reconstruction_loss_with_breakdown(
         preds,
         yb,
         weights=cfg.view_loss_weights or None,
         loss_type=cfg.loss_type,
     )
+    recon_mode = str(getattr(cfg, "multiview_recon_reduction", "attr_sum") or "attr_sum").strip().lower()
+    if recon_mode in {"dim_mean", "dim_normalized", "fair"}:
+        loss_recon = loss_recon_dim_norm
+    else:
+        recon_mode = "attr_sum"
+        loss_recon = loss_recon_attr_sum
+
     loss = loss_recon
 
     loss_eq = torch.zeros((), device=xb.device)
@@ -174,8 +188,26 @@ def _compute_multiview_loss(
         loss_orth = orth_loss(aux["expert_feats"], eps=cfg.orth_eps)
         loss = loss + cfg.gam_orth * loss_orth
 
+    if return_aux and return_breakdown:
+        recon_breakdown = {
+            "selected_mode": recon_mode,
+            "selected_loss": float(loss_recon.detach().item()),
+            "weighted_attr_sum_loss": float(loss_recon_attr_sum.detach().item()),
+            "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
+            "per_view": recon_details,
+        }
+        return loss, loss_recon, loss_eq, loss_div, loss_orth, aux, recon_breakdown
     if return_aux:
         return loss, loss_recon, loss_eq, loss_div, loss_orth, aux
+    if return_breakdown:
+        recon_breakdown = {
+            "selected_mode": recon_mode,
+            "selected_loss": float(loss_recon.detach().item()),
+            "weighted_attr_sum_loss": float(loss_recon_attr_sum.detach().item()),
+            "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
+            "per_view": recon_details,
+        }
+        return loss, loss_recon, loss_eq, loss_div, loss_orth, recon_breakdown
     return loss, loss_recon, loss_eq, loss_div, loss_orth
 
 
@@ -779,6 +811,11 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         model.train()
         epoch_loss = 0.0
         steps_seen = 0
+        multiview_recon_attr_sum_acc = 0.0
+        multiview_recon_dim_norm_acc = 0.0
+        multiview_recon_selected_acc = 0.0
+        multiview_per_view_acc: Dict[str, Dict[str, float]] = {}
+        multiview_selected_mode = "attr_sum"
         data_time = 0.0
         compute_time = 0.0
         iterator = train_loader
@@ -792,9 +829,23 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             xb = xb.to(device, non_blocking=True)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
-                loss, loss_recon, loss_eq, loss_div, loss_orth, aux = _compute_multiview_loss(
-                    model, xb, yb, cfg, return_aux=True, hard_topk=hard_topk
+                loss, loss_recon, loss_eq, loss_div, loss_orth, aux, recon_breakdown = _compute_multiview_loss(
+                    model, xb, yb, cfg, return_aux=True, return_breakdown=True, hard_topk=hard_topk
                 )
+                multiview_recon_attr_sum_acc += float(recon_breakdown["weighted_attr_sum_loss"])
+                multiview_recon_dim_norm_acc += float(recon_breakdown["weighted_dim_normalized_loss"])
+                multiview_recon_selected_acc += float(recon_breakdown["selected_loss"])
+                multiview_selected_mode = str(recon_breakdown["selected_mode"])
+                for name, stats in recon_breakdown["per_view"].items():
+                    if name not in multiview_per_view_acc:
+                        multiview_per_view_acc[name] = {
+                            "dim": float(stats["dim"]),
+                            "weight": float(stats["weight"]),
+                            "loss_sum_dims": 0.0,
+                            "loss_per_dim": 0.0,
+                        }
+                    multiview_per_view_acc[name]["loss_sum_dims"] += float(stats["loss_sum_dims"])
+                    multiview_per_view_acc[name]["loss_per_dim"] += float(stats["loss_per_dim"])
             else:
                 yb = yb.to(device, non_blocking=True)
                 try:
@@ -885,6 +936,27 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         val_loss,
                         elapsed,
                     )
+                if steps_seen > 0 and multiview_per_view_acc:
+                    metric_tag = "mse" if str(cfg.loss_type).strip().lower() == "mse" else "l1"
+                    logger.info(
+                        "Recon loss (weighted): attr_sum=%.6e dim_normalized=%.6e selected[%s]=%.6e",
+                        multiview_recon_attr_sum_acc / float(steps_seen),
+                        multiview_recon_dim_norm_acc / float(steps_seen),
+                        multiview_selected_mode,
+                        multiview_recon_selected_acc / float(steps_seen),
+                    )
+                    for name in sorted(multiview_per_view_acc.keys()):
+                        stats = multiview_per_view_acc[name]
+                        logger.info(
+                            "Recon breakdown [%s]: dim=%d weight=%.3f %s(sum_dims)=%.6e %s(per_dim_avg)=%.6e",
+                            name,
+                            int(round(stats["dim"])),
+                            float(stats["weight"]),
+                            metric_tag,
+                            stats["loss_sum_dims"] / float(steps_seen),
+                            metric_tag,
+                            stats["loss_per_dim"] / float(steps_seen),
+                        )
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(

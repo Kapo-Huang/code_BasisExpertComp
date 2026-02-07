@@ -421,6 +421,7 @@ def main():
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
+        multiview_recon_reduction=str(train_cfg_raw.get("multiview_recon_reduction", "attr_sum")),
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))

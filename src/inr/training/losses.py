@@ -1,4 +1,4 @@
-from typing import Dict, Optional
+from typing import Dict, Optional, Tuple
 
 import torch
 import torch.nn.functional as F
@@ -23,6 +23,65 @@ def reconstruction_loss(
         else:
             total = total + weight * F.l1_loss(pred, target)
     return total
+
+
+def reconstruction_loss_with_breakdown(
+    preds: Dict[str, torch.Tensor],
+    targets: Dict[str, torch.Tensor],
+    *,
+    weights: Optional[Dict[str, float]] = None,
+    loss_type: str = "mse",
+) -> Tuple[torch.Tensor, torch.Tensor, Dict[str, Dict[str, float]]]:
+    """
+    Returns:
+      - weighted_attr_sum_loss: sum_i w_i * L_i
+      - weighted_dim_normalized_loss: (sum_i w_i * d_i * L_i) / (sum_i w_i * d_i)
+      - details[name]:
+          dim: output dimension d_i (per sample)
+          weight: w_i
+          loss_per_dim: L_i (mean over batch and all output dims)
+          loss_sum_dims: d_i * L_i (mean over batch, summed over output dims)
+    """
+    if loss_type not in ("mse", "l1"):
+        raise ValueError("loss_type must be 'mse' or 'l1'")
+    if not preds:
+        raise ValueError("preds must be non-empty")
+
+    first_tensor = next(iter(preds.values()))
+    weighted_attr_sum_loss = torch.zeros((), device=first_tensor.device, dtype=first_tensor.dtype)
+    weighted_dim_numer = torch.zeros((), device=first_tensor.device, dtype=first_tensor.dtype)
+    weighted_dim_denom = torch.zeros((), device=first_tensor.device, dtype=first_tensor.dtype)
+    details: Dict[str, Dict[str, float]] = {}
+
+    for name, pred in preds.items():
+        if name not in targets:
+            raise KeyError(f"Missing target for prediction key '{name}'")
+        target = targets[name]
+        if pred.shape != target.shape:
+            raise ValueError(
+                f"Shape mismatch for '{name}': pred={tuple(pred.shape)} target={tuple(target.shape)}"
+            )
+        if pred.shape[0] <= 0:
+            raise ValueError(f"Invalid batch size for '{name}': {pred.shape[0]}")
+
+        weight = 1.0 if weights is None else float(weights.get(name, 1.0))
+        loss_per_dim = F.mse_loss(pred, target) if loss_type == "mse" else F.l1_loss(pred, target)
+        out_dim = int(pred[0].numel())
+        loss_sum_dims = loss_per_dim * float(out_dim)
+
+        weighted_attr_sum_loss = weighted_attr_sum_loss + weight * loss_per_dim
+        weighted_dim_numer = weighted_dim_numer + weight * loss_sum_dims
+        weighted_dim_denom = weighted_dim_denom + (weight * float(out_dim))
+
+        details[name] = {
+            "dim": float(out_dim),
+            "weight": float(weight),
+            "loss_per_dim": float(loss_per_dim.detach().item()),
+            "loss_sum_dims": float(loss_sum_dims.detach().item()),
+        }
+
+    weighted_dim_normalized_loss = weighted_dim_numer / (weighted_dim_denom + 1e-12)
+    return weighted_attr_sum_loss, weighted_dim_normalized_loss, details
 
 
 def load_balance_loss(probs: torch.Tensor, masks: torch.Tensor) -> torch.Tensor:
