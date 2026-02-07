@@ -1,7 +1,122 @@
-from typing import Dict, Optional, Tuple
+from typing import Dict, Iterable, List, Optional, Tuple
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+
+
+class MultiAttrEMALoss(nn.Module):
+    def __init__(
+        self,
+        attr_names: Iterable[str],
+        beta: float = 0.95,
+        eps: float = 1e-8,
+        w_min: float = 0.2,
+        w_max: float = 5.0,
+        warmup_steps: int = 0,
+        loss_type: str = "mse",
+    ):
+        super().__init__()
+        attr_names = list(attr_names)
+        if not attr_names:
+            raise ValueError("attr_names must be non-empty")
+        if len(set(attr_names)) != len(attr_names):
+            raise ValueError("attr_names must not contain duplicates")
+        if loss_type not in ("mse", "l1"):
+            raise ValueError("loss_type must be 'mse' or 'l1'")
+
+        self.attr_names: List[str] = attr_names
+        self.beta = float(beta)
+        self.eps = float(eps)
+        self.w_min = float(w_min)
+        self.w_max = float(w_max)
+        self.warmup_steps = int(warmup_steps)
+        self.loss_type = str(loss_type)
+
+        self.register_buffer("ema", torch.ones(len(self.attr_names)))
+        self.register_buffer("step", torch.zeros((), dtype=torch.long))
+
+    def _compute_per_attr_losses(
+        self,
+        preds: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor],
+    ) -> torch.Tensor:
+        losses = []
+        for name in self.attr_names:
+            if name not in preds:
+                raise KeyError(f"Missing prediction for key '{name}'")
+            if name not in targets:
+                raise KeyError(f"Missing target for key '{name}'")
+            pred = preds[name]
+            tgt = targets[name]
+            if pred.shape != tgt.shape:
+                raise ValueError(
+                    f"Shape mismatch for '{name}': pred={tuple(pred.shape)} target={tuple(tgt.shape)}"
+                )
+            li = F.mse_loss(pred, tgt) if self.loss_type == "mse" else F.l1_loss(pred, tgt)
+            losses.append(li)
+        return torch.stack(losses, dim=0)
+
+    @torch.no_grad()
+    def _update_ema(self, losses_vec: torch.Tensor):
+        self.ema.mul_(self.beta).add_(losses_vec * (1.0 - self.beta))
+
+    @torch.no_grad()
+    def _compute_weights_from_ema(self) -> torch.Tensor:
+        w = 1.0 / (self.ema + self.eps)
+        w = w / (w.mean() + self.eps)
+        return torch.clamp(w, self.w_min, self.w_max)
+
+    def forward(
+        self,
+        preds: Dict[str, torch.Tensor],
+        targets: Dict[str, torch.Tensor],
+        *,
+        return_details: bool = False,
+        return_tensors: bool = False,
+        update_ema: bool = True,
+    ):
+        losses_t = self._compute_per_attr_losses(preds, targets)
+        step_now = int(self.step.detach().item())
+
+        if step_now >= self.warmup_steps:
+            if update_ema:
+                self._update_ema(losses_t.detach())
+            with torch.no_grad():
+                w = self._compute_weights_from_ema()
+        else:
+            if update_ema:
+                self._update_ema(losses_t.detach())
+            w = torch.ones_like(losses_t)
+
+        if update_ema:
+            with torch.no_grad():
+                self.step.add_(1)
+
+        w = w.to(device=losses_t.device, dtype=losses_t.dtype)
+        total = torch.sum(w * losses_t)
+
+        if not return_details and not return_tensors:
+            return total
+
+        details = None
+        if return_details:
+            details = {
+                "per_attr_loss": {
+                    n: float(losses_t[i].detach().item()) for i, n in enumerate(self.attr_names)
+                },
+                "ema": {n: float(self.ema[i].detach().item()) for i, n in enumerate(self.attr_names)},
+                "weights": {n: float(w[i].detach().item()) for i, n in enumerate(self.attr_names)},
+                "total": float(total.detach().item()),
+                "step": int(self.step.detach().item()),
+                "warmup_steps": int(self.warmup_steps),
+            }
+
+        if return_details and return_tensors:
+            return total, losses_t, w, details
+        if return_details:
+            return total, details
+        return total, losses_t, w
 
 
 def reconstruction_loss(
