@@ -1,0 +1,76 @@
+experiment: exp_data_ionization_basis_experts_attention_only_recLoss
+exp_id: basis_experts_attention-ionization-only_recLoss
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_multi.npz
+  compute_target_stats: true
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 10
+  target_dir: ./data/raw/ionization/train
+  normalize: true
+model:
+  name: basis_experts_attention
+  in_features: 4
+  num_experts: 7
+  base_dim: 32
+  top_k: 2
+  expert_use_positional_encoding: true
+  expert_num_frequencies: 6
+  expert_num_layers: 3
+  gate_num_layers: 3
+  decoder_num_layers: 2
+  decoder_feature_dim: 256
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  gate_first_omega_0: 30.0
+  gate_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+  fusion_num_layers: 2
+  fusion_num_heads: 8
+  fusion_mlp_ratio: 1.0
+  fusion_dropout: 0.1
+training:
+  epochs: 300
+  batch_size: 16000
+  pred_batch_size: 16000
+  batches_per_epoch_budget: 300
+  lr: 5.0e-5
+  lr_decay_rate: 0.92
+  lr_decay_step: 30
+  log_every: 10
+  log_psnr_every: 10
+  psnr_sample_ratio: 0.1
+  save_every: 300
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0
+  gam_div: 0
+  div_sigma: 1.0
+  gam_orth: 0
+  pretrain:
+    enabled: true
+    mode: basis_two_stage
+    stage1_epochs: 2
+    stage2_epochs: 2
+    lr: 5.0e-5
+    batch_size: 16000
+    stage1_gam_div: 1.0e-4
+    stage1_gam_orth: 1.0e-4
+    stage1_div_sigma: 1.0
+    stage1_orth_eps: 1.0e-6
+    stage2_entropy_weight: 1.0e-3
+    stage2_lam_eq: 1.0e-2
+    stage2_temperature: 1.0
+  timestep_curriculum:
+    enabled: true
+    mode: stride
+    stride_groups: 5
+    epochs_per_group: 12

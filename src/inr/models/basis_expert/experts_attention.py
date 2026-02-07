@@ -56,6 +56,7 @@ class BasisExpertsAttention(nn.Module):
         expert_num_layers: int = 3,
         gate_hidden_dim: int = 128,
         gate_num_layers: int = 3,
+        decoder_feature_dim: Optional[int] = None,
         decoder_hidden_dim: int = 128,
         decoder_num_layers: int = 3,
         expert_first_omega_0: float = 30.0,
@@ -81,6 +82,9 @@ class BasisExpertsAttention(nn.Module):
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
         self.expert_feature_dim = expert_feature_dim
+        self.decoder_feature_dim = (
+            expert_feature_dim if decoder_feature_dim is None else int(decoder_feature_dim)
+        )
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
         self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
@@ -119,6 +123,15 @@ class BasisExpertsAttention(nn.Module):
             num_heads=num_heads,
             mlp_ratio=fusion_mlp_ratio,
             dropout=fusion_dropout,
+        )
+
+        self.decoder = SirenMLP(
+            in_dim=expert_feature_dim,
+            out_dim=self.decoder_feature_dim,
+            hidden_dim=decoder_hidden_dim,
+            num_layers=decoder_num_layers,
+            first_omega_0=decoder_first_omega_0,
+            hidden_omega_0=decoder_hidden_omega_0,
         )
 
         fused_dim = expert_feature_dim * 2
@@ -233,19 +246,44 @@ class BasisExpertsAttention(nn.Module):
     def pretrain_stage2_parameters(self):
         return list(self.gating.parameters()) + list(self.view_embedding.parameters())
 
-    def pretrain_stage2_router(self, coords: torch.Tensor):
+    def pretrain_teacher_shared_feat(self, coords: torch.Tensor, teacher_mode: str = "random_topk"):
+        expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)  # (B, M, F)
+        mode = (teacher_mode or "uniform").strip().lower()
+        if mode == "uniform":
+            weights = torch.full(
+                (expert_feats.shape[0], self.num_experts),
+                1.0 / float(self.num_experts),
+                device=expert_feats.device,
+                dtype=expert_feats.dtype,
+            )
+        elif mode == "random_topk":
+            weights = torch.zeros(
+                (expert_feats.shape[0], self.num_experts),
+                device=expert_feats.device,
+                dtype=expert_feats.dtype,
+            )
+            k = max(1, min(self.top_k, self.num_experts))
+            idx = torch.randint(0, self.num_experts, (expert_feats.shape[0], k), device=expert_feats.device)
+            weights.scatter_(1, idx, 1.0 / float(k))
+        else:
+            raise ValueError(f"Unknown teacher_mode: {teacher_mode}")
+        h_teacher = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
+        return self.decoder(h_teacher)
+
+    def pretrain_stage2_router(self, coords: torch.Tensor, temperature: float = 1.0):
         expert_feats = torch.stack([expert(coords) for expert in self.experts], dim=1)
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
+        temp = float(temperature) if temperature is not None else 1.0
+        if temp <= 0:
+            temp = 1.0
         for view_idx in range(self.num_views):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
-            probs, _ = self.gating(coords, view_embed)
-            mask = self._topk_mask(probs)
-            masked_probs = probs * mask
-            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
-            probs_list.append(masked_probs)
-            masks_list.append(mask)
+            _, logits = self.gating(coords, view_embed)
+            probs = torch.softmax(logits / temp, dim=-1)
+            probs_list.append(probs)
+            masks_list.append(torch.ones_like(probs))
         probs = torch.stack(probs_list, dim=1)
         masks = torch.stack(masks_list, dim=1)
         return probs, masks, expert_feats
@@ -254,6 +292,7 @@ class BasisExpertsAttention(nn.Module):
 def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, int]) -> BasisExpertsAttention:
     fusion_num_heads_raw = cfg.get("fusion_num_heads")
     fusion_num_heads = int(fusion_num_heads_raw) if fusion_num_heads_raw is not None else None
+    decoder_feature_raw = cfg.get("decoder_feature_dim")
     base_dim = cfg.get("base_dim")
     if base_dim is not None:
         base_dim = int(base_dim)
@@ -262,12 +301,18 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         expert_hidden_dim = 8 * base_dim
         gate_hidden_dim = 8 * base_dim
         decoder_hidden_dim = 8 * base_dim
+        decoder_feature_dim = (
+            int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
+        )
     else:
         expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
         view_embed_dim = int(cfg.get("view_embed_dim", 16))
         expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
         gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
         decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
+        decoder_feature_dim = (
+            int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
+        )
     return BasisExpertsAttention(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
@@ -281,6 +326,7 @@ def build_basisExperts_attention_from_config(cfg: Dict, view_specs: Dict[str, in
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
         gate_hidden_dim=gate_hidden_dim,
         gate_num_layers=int(cfg.get("gate_num_layers", 3)),
+        decoder_feature_dim=decoder_feature_dim,
         decoder_hidden_dim=decoder_hidden_dim,
         decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
