@@ -1,0 +1,34 @@
+experiment: exp_stsr_inr_sukong_subset_E_first2108510
+exp_id: STSR-INR-subset-E-first2108510
+experiment_root: experiments
+data:
+  dataset_name: sukong
+  split: train
+  data_root: ./data
+  x_path: ./data/raw/sukong/train_subset_first_2108510/source_cell_XYZT.npy
+  attr_paths:
+    target_E: ./data/raw/sukong/train_subset_first_2108510/target_cell_E.npy
+    target_E_IntegrationPoints: ./data/raw/sukong/train_subset_first_2108510/target_cell_E_IntegrationPoints.npy
+  normalize: true
+model:
+  name: stsr_inr
+  in_features: 4
+  init: 64
+  num_res: 5
+  omega_0: 5.0
+  embedding_dims: 256
+  outermost_linear: true
+  use_global_latent: true
+training:
+  num_workers: 4
+  epochs: 80
+  batch_size: 8192
+  pred_batch_size: 8192
+  lr: 5.0e-5
+  log_every: 10
+  save_every: 10
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0.0
+  gam_div: 0.0

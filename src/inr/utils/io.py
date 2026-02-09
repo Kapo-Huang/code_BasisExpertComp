@@ -1,6 +1,6 @@
 import os
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Dict, Optional
 
 import torch
 
@@ -14,8 +14,8 @@ def save_checkpoint(
     dataset,
     path: str,
     suffix: str = "",
-    epoch: int | None = None,
-    optimizer: torch.optim.Optimizer | None = None,
+    epoch: Optional[int] = None,
+    optimizer: Optional[torch.optim.Optimizer] = None,
 ):
     save_path = path if suffix == "" else f"{path[:-4]}{suffix}.pth"
     ensure_dir(save_path)

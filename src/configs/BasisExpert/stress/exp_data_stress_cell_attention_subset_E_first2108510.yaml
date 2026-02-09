@@ -1,16 +1,14 @@
-experiment: exp9_basisExpert_sukong_multiview_xyzt_attention
-exp_id: basisExpert-sukong-multiview-attention
+experiment: exp9_basisExpert_sukong_multiview_xyzt_attention_subset_E_first2108510
+exp_id: basisExpert-sukong-multiview-attention-subset-E-first2108510
 experiment_root: experiments
 data:
   dataset_name: sukong
   split: train
   data_root: ./data
-  x_path: ./data/raw/sukong/train/source_cell_XYZT.npy
+  x_path: ./data/raw/sukong/train_subset_first_2108510/source_cell_XYZT.npy
   attr_paths:
-    target_E: ./data/raw/sukong/train/target_cell_E.npy
-    target_E_IntegrationPoints: ./data/raw/sukong/train/target_cell_E_IntegrationPoints.npy
-    target_S: ./data/raw/sukong/train/target_cell_S.npy
-    target_S_IntegrationPoints: ./data/raw/sukong/train/target_cell_S_IntegrationPoints.npy
+    target_E: ./data/raw/sukong/train_subset_first_2108510/target_cell_E.npy
+    target_E_IntegrationPoints: ./data/raw/sukong/train_subset_first_2108510/target_cell_E_IntegrationPoints.npy
   normalize: true
 model:
   name: basisExperts_attention
