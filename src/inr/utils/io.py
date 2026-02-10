@@ -16,6 +16,7 @@ def save_checkpoint(
     suffix: str = "",
     epoch: Optional[int] = None,
     optimizer: Optional[torch.optim.Optimizer] = None,
+    extra_state: Optional[Dict[str, Any]] = None,
 ):
     save_path = path if suffix == "" else f"{path[:-4]}{suffix}.pth"
     ensure_dir(save_path)
@@ -37,6 +38,8 @@ def save_checkpoint(
         payload["epoch"] = int(epoch)
     if optimizer is not None:
         payload["optimizer_state"] = optimizer.state_dict()
+    if extra_state:
+        payload.update(extra_state)
     torch.save(payload, save_path)
     print(f"Saved checkpoint to {save_path}")
 

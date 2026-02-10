@@ -196,6 +196,8 @@ def main():
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     train_cfg_raw = cfg["training"]
+    model_name = str(model_cfg.get("name", "")).lower()
+    is_stsr = model_name in {"stsr_inr", "stsrinr", "stsr-inr"}
 
     data_info = resolve_data_paths(data_cfg)
     exp_layout = build_experiment_layout(cfg, model_cfg, data_info)
@@ -239,6 +241,15 @@ def main():
         gam_div=float(train_cfg_raw.get("gam_div", 0.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
         resume_path=train_cfg_raw.get("resume_path"),
+        stsr_use_latent_table=bool(train_cfg_raw.get("stsr_use_latent_table", is_stsr)),
+        stsr_latent_lr=(
+            float(train_cfg_raw["stsr_latent_lr"])
+            if train_cfg_raw.get("stsr_latent_lr") is not None
+            else None
+        ),
+        stsr_kl_weight=float(train_cfg_raw.get("stsr_kl_weight", train_cfg_raw.get("stsr_kl_reg", 0.0))),
+        stsr_latent_weight_decay=float(train_cfg_raw.get("stsr_latent_weight_decay", 1e-6)),
+        stsr_latent_embeddings=int(train_cfg_raw.get("stsr_latent_embeddings", 0)),
     )
 
     train_model(model, dataset, train_cfg)

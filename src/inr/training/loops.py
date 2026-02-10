@@ -2,7 +2,7 @@ import math
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, Optional, Tuple
 
 import numpy as np
 import torch
@@ -39,6 +39,85 @@ class TrainingConfig:
     gam_div: float = 0.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
     resume_path: Optional[str] = None
+    stsr_use_latent_table: bool = False
+    stsr_latent_lr: Optional[float] = None
+    stsr_kl_weight: float = 0.0
+    stsr_latent_weight_decay: float = 1e-6
+    stsr_latent_embeddings: int = 0
+
+
+@dataclass
+class STSRLatentRuntime:
+    table: torch.nn.Module
+    optimizer: torch.optim.Optimizer
+    view_to_index: Optional[Dict[str, int]] = None
+
+    def sample(self, batch_size: int, device: torch.device, train: bool):
+        if self.view_to_index:
+            latents = {}
+            for name, idx in self.view_to_index.items():
+                query_index = torch.full((batch_size,), idx, dtype=torch.long, device=device)
+                latents[name] = self.table(query_index, train=train)
+            return latents
+        query_index = torch.zeros(batch_size, dtype=torch.long, device=device)
+        return self.table(query_index, train=train)
+
+
+def _is_stsr_model(model: torch.nn.Module) -> bool:
+    return model.__class__.__name__.lower().startswith("stsr")
+
+
+def _build_stsr_latent_runtime(
+    model: torch.nn.Module,
+    cfg: TrainingConfig,
+    device: torch.device,
+) -> Optional[STSRLatentRuntime]:
+    if not cfg.stsr_use_latent_table or not _is_stsr_model(model):
+        return None
+
+    from inr.models.sota.stsr_inr import VarVADEmbedding
+
+    embedding_dims = int(getattr(model, "embedding_dims", 256))
+    if hasattr(model, "view_names"):
+        view_names = list(getattr(model, "view_names"))
+        latent_num = int(cfg.stsr_latent_embeddings or len(view_names))
+        if latent_num < len(view_names):
+            raise ValueError(
+                f"stsr_latent_embeddings={latent_num} < number of views={len(view_names)}."
+            )
+        view_to_index = {name: idx for idx, name in enumerate(view_names)}
+    else:
+        latent_num = int(cfg.stsr_latent_embeddings or 1)
+        view_to_index = None
+
+    latent_lr = float(cfg.stsr_latent_lr if cfg.stsr_latent_lr is not None else cfg.lr)
+    table = VarVADEmbedding(embedding_dims=embedding_dims, embedding_nums=latent_num).to(device)
+    optimizer = torch.optim.Adam(
+        table.parameters(),
+        lr=latent_lr,
+        betas=(0.9, 0.999),
+        weight_decay=float(cfg.stsr_latent_weight_decay),
+    )
+    print(
+        f"STSR latent table enabled: embeddings={latent_num}, dim={embedding_dims}, lr={latent_lr:.2e}"
+    )
+    return STSRLatentRuntime(table=table, optimizer=optimizer, view_to_index=view_to_index)
+
+
+def _forward_model(
+    model: torch.nn.Module,
+    xb: torch.Tensor,
+    *,
+    return_aux: bool = False,
+    latent_payload=None,
+):
+    if return_aux:
+        if latent_payload is None:
+            return model(xb, return_aux=True)
+        return model(xb, return_aux=True, latent=latent_payload)
+    if latent_payload is None:
+        return model(xb)
+    return model(xb, latent=latent_payload)
 
 
 def _unpack_batch(batch):
@@ -52,8 +131,8 @@ def _is_multiview_target(targets) -> bool:
     return isinstance(targets, dict)
 
 
-def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig):
-    preds, aux = model(xb, return_aux=True)
+def _compute_multiview_loss(model, xb, yb, cfg: TrainingConfig, latent_payload=None):
+    preds, aux = _forward_model(model, xb, return_aux=True, latent_payload=latent_payload)
     loss_recon = reconstruction_loss(
         preds,
         yb,
@@ -106,6 +185,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     _print_model_size(model)
     optim = torch.optim.Adam(model.parameters(), lr=cfg.lr, betas=(0.9, 0.999))
     criterion = torch.nn.MSELoss()
+    stsr_latent_runtime = _build_stsr_latent_runtime(model, cfg, device)
 
     start_epoch = 1
     if cfg.resume_path:
@@ -117,6 +197,21 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 optim.load_state_dict(optim_state)
             except Exception as exc:
                 print(f"Warning: failed to load optimizer state from {cfg.resume_path}: {exc}")
+        if stsr_latent_runtime is not None:
+            latent_state = checkpoint.get("stsr_latent_state")
+            if latent_state is not None:
+                stsr_latent_runtime.table.load_state_dict(latent_state)
+            else:
+                print(
+                    f"Warning: resume checkpoint {cfg.resume_path} has no STSR latent state; "
+                    "a new latent table is initialized."
+                )
+            latent_optim_state = checkpoint.get("stsr_latent_optimizer_state")
+            if latent_optim_state is not None:
+                try:
+                    stsr_latent_runtime.optimizer.load_state_dict(latent_optim_state)
+                except Exception as exc:
+                    print(f"Warning: failed to load STSR latent optimizer from {cfg.resume_path}: {exc}")
         if resume_epoch > 0:
             start_epoch = resume_epoch + 1
         if start_epoch > cfg.epochs:
@@ -127,16 +222,26 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     for epoch in range(start_epoch, cfg.epochs + 1):
         model.train()
         epoch_loss = 0.0
+        epoch_kl = 0.0
         iterator = tqdm(train_loader, desc=f"epoch {epoch}/{cfg.epochs}", leave=False)
         for batch in iterator:
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device)
+            latent_payload = None
+            if stsr_latent_runtime is not None:
+                latent_payload = stsr_latent_runtime.sample(
+                    batch_size=xb.shape[0],
+                    device=xb.device,
+                    train=True,
+                )
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device) for name, tensor in yb.items()}
-                loss, loss_recon, loss_eq, loss_div = _compute_multiview_loss(model, xb, yb, cfg)
+                loss, loss_recon, loss_eq, loss_div = _compute_multiview_loss(
+                    model, xb, yb, cfg, latent_payload=latent_payload
+                )
             else:
                 yb = yb.to(device)
-                pred = model(xb)
+                pred = _forward_model(model, xb, latent_payload=latent_payload)
                 loss = criterion(pred, yb)
                 loss_recon = loss
                 loss_eq = torch.zeros((), device=loss.device)
@@ -148,35 +253,95 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     reg = model.indicator_regularization()
                     loss = loss + (reg if torch.is_tensor(reg) else torch.tensor(reg, device=loss.device, dtype=loss.dtype))
             optim.zero_grad()
+            if stsr_latent_runtime is not None:
+                stsr_latent_runtime.optimizer.zero_grad()
             loss.backward()
+            if stsr_latent_runtime is not None:
+                stsr_latent_runtime.optimizer.step()
             optim.step()
             epoch_loss += loss.item() * xb.shape[0]
         epoch_loss /= len(train_ds)
+        if stsr_latent_runtime is not None and cfg.stsr_kl_weight > 0.0:
+            stsr_latent_runtime.optimizer.zero_grad()
+            loss_kl = stsr_latent_runtime.table.kl_loss() * cfg.stsr_kl_weight
+            loss_kl.backward()
+            stsr_latent_runtime.optimizer.step()
+            epoch_kl = float(loss_kl.item())
 
         if epoch % cfg.log_every == 0 or epoch == 1:
             elapsed = time.time() - start_time
+            kl_text = f" KL={epoch_kl:.6e}" if stsr_latent_runtime is not None else ""
             # calculate PSNR on full train set
             if not is_multiview:
-                psnr_val = _compute_psnr_streaming_single(model, train_loader, dataset, device)
+                psnr_val = _compute_psnr_streaming_single(
+                    model,
+                    train_loader,
+                    dataset,
+                    device,
+                    stsr_latent_runtime=stsr_latent_runtime,
+                )
                 print(
-                    f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} PSNR={psnr_val:.2f} time={elapsed:.1f}s"
+                    f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e}{kl_text} PSNR={psnr_val:.2f} time={elapsed:.1f}s"
                 )
             else:
-                psnr_vals = _compute_psnr_streaming_multiview(model, train_loader, dataset, device)
+                psnr_vals = _compute_psnr_streaming_multiview(
+                    model,
+                    train_loader,
+                    dataset,
+                    device,
+                    stsr_latent_runtime=stsr_latent_runtime,
+                )
                 psnr_parts = [f"{name}={psnr_vals[name]:.2f}" for name in psnr_vals.keys()]
                 psnr_text = " ".join(psnr_parts)
                 print(
-                    f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e} PSNR[{psnr_text}] time={elapsed:.1f}s"
+                    f"Epoch {epoch}/{cfg.epochs} loss={epoch_loss:.6e}{kl_text} PSNR[{psnr_text}] time={elapsed:.1f}s"
                 )
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
-            save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}", epoch=epoch, optimizer=optim)
-            predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
+            extra_state = {}
+            if stsr_latent_runtime is not None:
+                extra_state["stsr_latent_state"] = stsr_latent_runtime.table.state_dict()
+                extra_state["stsr_latent_optimizer_state"] = stsr_latent_runtime.optimizer.state_dict()
+            save_checkpoint(
+                model,
+                dataset,
+                cfg.save_model,
+                suffix=f"_epoch{epoch}",
+                epoch=epoch,
+                optimizer=optim,
+                extra_state=extra_state or None,
+            )
+            predict_full(
+                model,
+                dataset,
+                cfg,
+                device,
+                suffix=f"_epoch{epoch}",
+                stsr_latent_runtime=stsr_latent_runtime,
+            )
 
-    save_checkpoint(model, dataset, cfg.save_model, epoch=cfg.epochs, optimizer=optim)
-    predict_full(model, dataset, cfg, device)
+    extra_state = {}
+    if stsr_latent_runtime is not None:
+        extra_state["stsr_latent_state"] = stsr_latent_runtime.table.state_dict()
+        extra_state["stsr_latent_optimizer_state"] = stsr_latent_runtime.optimizer.state_dict()
+    save_checkpoint(
+        model,
+        dataset,
+        cfg.save_model,
+        epoch=cfg.epochs,
+        optimizer=optim,
+        extra_state=extra_state or None,
+    )
+    predict_full(model, dataset, cfg, device, stsr_latent_runtime=stsr_latent_runtime)
 
 
-def predict_full(model, dataset: Dataset, cfg: TrainingConfig, device, suffix: str = ""):
+def predict_full(
+    model,
+    dataset: Dataset,
+    cfg: TrainingConfig,
+    device,
+    suffix: str = "",
+    stsr_latent_runtime: Optional[STSRLatentRuntime] = None,
+):
     model.eval()
     loader_kwargs = {
         "pin_memory": True,
@@ -200,7 +365,14 @@ def predict_full(model, dataset: Dataset, cfg: TrainingConfig, device, suffix: s
             xb, _ = _unpack_batch(batch)
             xb = xb.to(device)
             batch_size = xb.shape[0]
-            pred = model(xb)
+            latent_payload = None
+            if stsr_latent_runtime is not None:
+                latent_payload = stsr_latent_runtime.sample(
+                    batch_size=batch_size,
+                    device=xb.device,
+                    train=False,
+                )
+            pred = _forward_model(model, xb, latent_payload=latent_payload)
             if isinstance(pred, dict):
                 blocks = {}
                 for name, tensor in pred.items():
@@ -245,7 +417,13 @@ def _print_model_size(model: torch.nn.Module) -> None:
         f"Model params: {total_params:,} ({trainable_params:,} trainable), size={total_mb:.2f} MB"
     )
 
-def _compute_psnr_streaming_single(model, loader, dataset, device) -> float:
+def _compute_psnr_streaming_single(
+    model,
+    loader,
+    dataset,
+    device,
+    stsr_latent_runtime: Optional[STSRLatentRuntime] = None,
+) -> float:
     model.eval()
     total_se = 0.0
     total_count = 0
@@ -259,7 +437,14 @@ def _compute_psnr_streaming_single(model, loader, dataset, device) -> float:
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device)
             yb = yb.to(device)
-            pred = model(xb)
+            latent_payload = None
+            if stsr_latent_runtime is not None:
+                latent_payload = stsr_latent_runtime.sample(
+                    batch_size=xb.shape[0],
+                    device=xb.device,
+                    train=False,
+                )
+            pred = _forward_model(model, xb, latent_payload=latent_payload)
             if hasattr(dataset, "denormalize_targets"):
                 pred = dataset.denormalize_targets(pred)
                 yb = dataset.denormalize_targets(yb)
@@ -279,7 +464,13 @@ def _compute_psnr_streaming_single(model, loader, dataset, device) -> float:
     return 10.0 * math.log10((data_range ** 2) / mse)
 
 
-def _compute_psnr_streaming_multiview(model, loader, dataset, device) -> dict:
+def _compute_psnr_streaming_multiview(
+    model,
+    loader,
+    dataset,
+    device,
+    stsr_latent_runtime: Optional[STSRLatentRuntime] = None,
+) -> dict:
     model.eval()
     total_se = {}
     total_count = {}
@@ -292,7 +483,14 @@ def _compute_psnr_streaming_multiview(model, loader, dataset, device) -> dict:
         for batch in iterator:
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device)
-            preds = model(xb)
+            latent_payload = None
+            if stsr_latent_runtime is not None:
+                latent_payload = stsr_latent_runtime.sample(
+                    batch_size=xb.shape[0],
+                    device=xb.device,
+                    train=False,
+                )
+            preds = _forward_model(model, xb, latent_payload=latent_payload)
             for name, pred in preds.items():
                 target = yb[name].to(device)
                 if hasattr(dataset, "denormalize_attr"):

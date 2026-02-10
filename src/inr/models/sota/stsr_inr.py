@@ -259,10 +259,38 @@ class STSRINRMultiView(nn.Module):
         request: Optional[str] = None,
         *,
         return_aux: bool = False,
-        latent: Optional[torch.Tensor] = None,
+        latent=None,
     ):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
+
+        if isinstance(latent, dict):
+            target_names = self.view_names if request is None else [request]
+            preds = {}
+            feat_list = []
+            for name in target_names:
+                latent_one = self._resolve_latent(coords, latent.get(name))
+                latent_code = self.Modulated_Net.net[0](latent_one)
+                coords_feat = self.Synthesis_Net.net[0](coords)
+                for i in range(1, self.layer_num):
+                    coords_feat = self.Synthesis_Net.net[i](coords_feat * latent_code)
+                    latent_code = self.Modulated_Net.net[i](latent_code)
+                preds[name] = self.heads[name](coords_feat, latent_code)
+                feat_list.append(coords_feat)
+
+            output = preds if request is None else preds[request]
+            if return_aux:
+                bsz = coords.shape[0]
+                probs = torch.zeros(bsz, self.num_views, self.num_experts, device=coords.device)
+                masks = torch.zeros_like(probs)
+                expert_feats = torch.stack(feat_list, dim=1)
+                aux = {
+                    "probs": probs,
+                    "masks": masks,
+                    "expert_feats": expert_feats,
+                }
+                return output, aux
+            return output
 
         latent = self._resolve_latent(coords, latent)
         latent_code = self.Modulated_Net.net[0](latent)
