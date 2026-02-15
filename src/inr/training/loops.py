@@ -125,6 +125,7 @@ class TrainingConfig:
     device: Optional[str] = None
     exp_dir: str = ""
     exp_id: str = ""
+    run_timestamp: str = ""
     loss_type: str = "mse"
     lam_eq: float = 0.0
     gam_div: float = 0.0
@@ -1180,12 +1181,18 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         # if epoch % cfg.log_every == 0 or epoch == 1:
         #     print(f"Epoch {epoch} timing: data={data_time:.2f}s compute={compute_time:.2f}s")
         if cfg.save_every > 0 and epoch % cfg.save_every == 0:
-            save_checkpoint(model, dataset, cfg.save_model, suffix=f"_epoch{epoch}")
+            save_checkpoint(
+                model,
+                dataset,
+                cfg.save_model,
+                suffix=f"_epoch{epoch}",
+                run_timestamp=cfg.run_timestamp,
+            )
             predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
-    save_checkpoint(model, dataset, cfg.save_model)
+    save_checkpoint(model, dataset, cfg.save_model, run_timestamp=cfg.run_timestamp)
     predict_full(model, dataset, cfg, device)
 
 

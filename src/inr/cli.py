@@ -7,6 +7,7 @@ os.environ.setdefault("NUMEXPR_NUM_THREADS", "64")
 import argparse
 import logging
 import time
+from datetime import datetime
 from pathlib import Path
 
 import numpy as np
@@ -299,12 +300,13 @@ def main():
     data_cfg = cfg["data"]
     model_cfg = cfg["model"]
     train_cfg_raw = cfg["training"]
+    run_timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
 
     t1 = time.perf_counter()
     data_info = resolve_data_paths(data_cfg)
     logger.info("Resolve data paths: %.2fs", time.perf_counter() - t1)
     exp_layout = build_experiment_layout(cfg, model_cfg, data_info)
-    setup_logging(log_dir=Path(exp_layout["exp_dir"]) / "logs")
+    setup_logging(log_dir=Path(exp_layout["exp_dir"]) / "logs", run_timestamp=run_timestamp)
 
     normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
     normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
@@ -423,6 +425,7 @@ def main():
         device=args.device,
         exp_dir=exp_layout["exp_dir"],
         exp_id=exp_layout["exp_id"],
+        run_timestamp=run_timestamp,
         loss_type=str(train_cfg_raw.get("loss_type", "mse")),
         lam_eq=float(train_cfg_raw.get("lam_eq", 0.0)),
         gam_div=float(train_cfg_raw.get("gam_div", 0.0)),

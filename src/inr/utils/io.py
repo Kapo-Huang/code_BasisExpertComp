@@ -11,8 +11,26 @@ def ensure_dir(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
-def save_checkpoint(model: torch.nn.Module, dataset, path: str, suffix: str = ""):
-    save_path = path if suffix == "" else f"{path[:-4]}{suffix}.pth"
+def _resolve_checkpoint_path(path: str, suffix: str = "", run_timestamp: str = "") -> str:
+    path_obj = Path(path)
+    ext = path_obj.suffix or ".pth"
+    stem = path_obj.stem if path_obj.suffix else path_obj.name
+    run_tag = (run_timestamp or "").strip()
+    if run_tag and run_tag not in stem:
+        stem = f"{stem}_{run_tag}"
+    if suffix:
+        stem = f"{stem}{suffix}"
+    return str(path_obj.with_name(f"{stem}{ext}"))
+
+
+def save_checkpoint(
+    model: torch.nn.Module,
+    dataset,
+    path: str,
+    suffix: str = "",
+    run_timestamp: str = "",
+):
+    save_path = _resolve_checkpoint_path(path, suffix=suffix, run_timestamp=run_timestamp)
     ensure_dir(save_path)
     def _to_numpy(value):
         if value is None:

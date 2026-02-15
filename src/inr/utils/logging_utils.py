@@ -7,6 +7,7 @@ def setup_logging(
     level: str | None = None,
     log_dir: str | Path | None = None,
     log_file: str | None = None,
+    run_timestamp: str | None = None,
 ) -> None:
     level_name = (level or os.getenv("INR_LOG_LEVEL", "INFO")).strip().upper()
     level_value = getLevelName(level_name)
@@ -26,7 +27,7 @@ def setup_logging(
     log_dir_path = Path(log_dir)
     log_dir_path.mkdir(parents=True, exist_ok=True)
     if log_file is None:
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        timestamp = (run_timestamp or "").strip() or datetime.now().strftime("%Y%m%d_%H%M%S")
         log_file = f"run_{timestamp}.log"
     log_path = log_dir_path / log_file
 
