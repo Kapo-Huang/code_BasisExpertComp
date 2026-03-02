@@ -720,6 +720,18 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
                 logits = model.pretrain_forward(xb)
             else:
                 raise ValueError("Pretrain requires model.pretrain_forward(x)")
+            if logits.ndim != 2:
+                raise ValueError(f"pretrain_forward must return shape (B, C), got {tuple(logits.shape)}")
+            num_classes = int(logits.shape[-1])
+            target_min = int(expert_id.min().item())
+            target_max = int(expert_id.max().item())
+            if target_min < 0 or target_max >= num_classes:
+                raise ValueError(
+                    "Invalid pretrain target labels: "
+                    f"min={target_min}, max={target_max}, num_classes={num_classes}. "
+                    "This usually means cached assignments were generated with a different num_experts. "
+                    "Clear pretrain.assignments_cache_path (or set it to empty) and rerun."
+                )
             loss = F.cross_entropy(logits, expert_id)
             opt.zero_grad()
             loss.backward()
@@ -1188,12 +1200,14 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 suffix=f"_epoch{epoch}",
                 run_timestamp=cfg.run_timestamp,
             )
-            predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
+            print(f"Debug: No predict_full is set, only checkpoint save at epoch {epoch}.")
+            # predict_full(model, dataset, cfg, device, suffix=f"_epoch{epoch}")
 
     if best_state is not None:
         model.load_state_dict(best_state)
     save_checkpoint(model, dataset, cfg.save_model, run_timestamp=cfg.run_timestamp)
-    predict_full(model, dataset, cfg, device)
+    print(f"Debug: No predict_full is set, only checkpoint save at the end of training.")
+    # predict_full(model, dataset, cfg, device)
 
 
 def evaluate(
