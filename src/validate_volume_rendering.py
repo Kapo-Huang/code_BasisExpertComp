@@ -1,12 +1,17 @@
 import argparse
+import inspect
 import importlib
+import json
 import logging
+import re
 import sys
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+import pyvista as pv
 import torch
+from matplotlib.colors import ListedColormap
 
 from inr.cli import build_model, load_config, resolve_data_paths
 from inr.data import MultiTargetVolumetricDataset, VolumetricDataset
@@ -14,20 +19,10 @@ from inr.datasets.base import parse_volume_shape
 from inr.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
-try:
-    from tqdm import tqdm as _tqdm
-except Exception:
-    _tqdm = None
+from tqdm import tqdm as _tqdm
 
-
-def _import_pyvista():
-    try:
-        import pyvista as pv  # type: ignore
-    except ModuleNotFoundError as exc:
-        raise ModuleNotFoundError(
-            "pyvista is not installed. Please install it first: pip install pyvista"
-        ) from exc
-    return pv
+GLOBAL_VMIN = -1.0
+GLOBAL_VMAX = 1.0
 
 
 def _parse_args():
@@ -53,16 +48,31 @@ def _parse_args():
     )
     parser.add_argument("--outdir", type=str, default="validate_out/volume_rendering", help="Output image directory.")
     parser.add_argument(
-        "--num-views",
+        "--window-width",
         type=int,
-        default=5,
-        choices=[1, 3, 5],
-        help="Rendered camera views per volume.",
+        default=1280,
+        help="Render image width.",
     )
-    parser.add_argument("--window-width", type=int, default=1280, help="Render image width.")
     parser.add_argument("--window-height", type=int, default=960, help="Render image height.")
     parser.add_argument("--background", type=str, default="white", help="Background color.")
-    parser.add_argument("--cmap", type=str, default="coolwarm", help="Colormap.")
+    parser.add_argument(
+        "--vertex-shader",
+        type=str,
+        default="shaders/vertexShader.glsl",
+        help="Path to custom vertex shader source.",
+    )
+    parser.add_argument(
+        "--fragment-shader",
+        type=str,
+        default="shaders/fragmentShader.glsl",
+        help="Path to custom fragment shader source.",
+    )
+    parser.add_argument(
+        "--tf-config",
+        type=str,
+        default="TF_H2.config",
+        help="TransferFunction config path (.config JSON with alpha/colour control points).",
+    )
     parser.add_argument("--clim-low-pct", type=float, default=1.0, help="Lower percentile for clim.")
     parser.add_argument("--clim-high-pct", type=float, default=99.9, help="Upper percentile for clim.")
     parser.add_argument(
@@ -124,19 +134,17 @@ def _register_numpy_core_aliases():
 
 
 def _torch_load_checkpoint(path: Path):
-    def _load():
-        try:
-            return torch.load(str(path), map_location="cpu", weights_only=False)
-        except TypeError:
-            return torch.load(str(path), map_location="cpu")
+    # Some historical checkpoints were serialized with internal numpy module paths.
+    # Register aliases before loading so torch.load can resolve them directly.
+    _register_numpy_core_aliases()
 
-    try:
-        return _load()
-    except ModuleNotFoundError as exc:
-        if exc.name not in {"numpy._core", "numpy._core.multiarray"}:
-            raise
-        _register_numpy_core_aliases()
-        return _load()
+    # `weights_only` exists in newer torch versions. We check signature once
+    # instead of relying on exception-based control flow.
+    load_kwargs = {"map_location": "cpu"}
+    if "weights_only" in inspect.signature(torch.load).parameters:
+        load_kwargs["weights_only"] = False
+
+    return torch.load(str(path), **load_kwargs)
 
 
 def _load_target_stats(stats_path: str, attr_paths=None):
@@ -328,6 +336,8 @@ def _predict_volumes_for_timestep(
     denorm_stats: Dict[str, Tuple[np.ndarray, np.ndarray]],
     device: torch.device,
 ) -> Dict[str, np.ndarray]:
+    # Coordinates are generated in the same flattened order as training data:
+    # x changes fastest, then y, then z.
     X = int(shape.X)
     Y = int(shape.Y)
     Z = int(shape.Z)
@@ -337,6 +347,10 @@ def _predict_volumes_for_timestep(
     x_std = dataset.x_std.reshape(-1).cpu().numpy().astype(np.float32)
 
     out_flat = {name: np.empty((V,), dtype=np.float32) for name in attrs}
+
+    # Different model implementations may or may not support `hard_topk`.
+    # Detect once, then use a direct call path in the hot loop.
+    supports_hard_topk = "hard_topk" in inspect.signature(model.forward).parameters
 
     model.eval()
     with torch.no_grad():
@@ -351,9 +365,9 @@ def _predict_volumes_for_timestep(
             coords = (coords - x_mean[None, :]) / x_std[None, :]
             xb = torch.from_numpy(coords).to(device, non_blocking=True)
 
-            try:
+            if supports_hard_topk:
                 pred = model(xb, hard_topk=True)
-            except TypeError:
+            else:
                 pred = model(xb)
 
             if isinstance(pred, dict):
@@ -385,7 +399,9 @@ def _predict_volumes_for_timestep(
     return volumes
 
 
-def _make_camera_views_from_grid(grid, dist_scale: float, num_views: int):
+def _make_camera_views_from_grid(grid, dist_scale: float):
+    # Camera distance is scaled by the bounding-box diagonal to keep a
+    # comparable framing across datasets with different physical extents.
     bounds = np.asarray(grid.bounds, dtype=np.float64)
     center = tuple(np.asarray(grid.center, dtype=np.float64).tolist())
     dx = float(bounds[1] - bounds[0])
@@ -397,19 +413,11 @@ def _make_camera_views_from_grid(grid, dist_scale: float, num_views: int):
     dist = max(1e-6, float(dist_scale) * diag)
 
     c = np.asarray(center, dtype=np.float64)
-    dirs = [
-        ("main", np.asarray([0.92, 0.74, 0.58], dtype=np.float64), (0.0, 0.0, 1.0)),
-        ("main_alt", np.asarray([-0.88, 0.72, 0.56], dtype=np.float64), (0.0, 0.0, 1.0)),
-        ("top_oblique", np.asarray([0.52, 0.46, 1.00], dtype=np.float64), (0.0, 0.0, 1.0)),
-        ("side_x", np.asarray([1.00, 0.10, 0.08], dtype=np.float64), (0.0, 0.0, 1.0)),
-        ("side_y", np.asarray([0.10, 1.00, 0.08], dtype=np.float64), (0.0, 0.0, 1.0)),
-    ]
-    take = 1 if int(num_views) <= 1 else (3 if int(num_views) <= 3 else 5)
-    views = []
-    for name, d, up in dirs[:take]:
-        d = d / (np.linalg.norm(d) + 1e-12)
-        cam_pos = tuple((c + dist * d).tolist())
-        views.append((name, cam_pos, up))
+    # Keep only the validated main view requested by the user.
+    main_dir = np.asarray([0.92, 0.74, 0.58], dtype=np.float64)
+    main_dir = main_dir / (np.linalg.norm(main_dir) + 1e-12)
+    cam_pos = tuple((c + dist * main_dir).tolist())
+    views = [("main", cam_pos, (0.0, 0.0, 1.0))]
     return center, views, diag
 
 
@@ -471,7 +479,6 @@ def _rotate_up_around_view(cam_pos, center, cam_up, angle_deg: float = -90.0):
 
 def _volume_to_grid(volume_zyx: np.ndarray):
     # volume_zyx: (Z, Y, X) -> VTK image data in (X, Y, Z)
-    pv = _import_pyvista()
     vol_xyz = np.transpose(np.asarray(volume_zyx, dtype=np.float32), (2, 1, 0))
     grid = pv.ImageData(dimensions=vol_xyz.shape)
     grid.point_data["values"] = np.ascontiguousarray(vol_xyz.ravel(order="F"))
@@ -489,91 +496,219 @@ def _compute_clim(volume: np.ndarray, low_pct: float, high_pct: float):
     return [lo, hi]
 
 
-def _build_opacity(
-    volume_zyx: np.ndarray,
-    clim: List[float],
-    p0: float = 92.0,
-    p1: float = 97.0,
-    p2: float = 99.7,
-    o1: float = 0.02,
-    o2: float = 0.10,
-    o3: float = 0.35,
-) -> List[float]:
-    finite = np.asarray(volume_zyx, dtype=np.float64)
-    finite = finite[np.isfinite(finite)]
-    if finite.size == 0:
-        return [0.0] * 256
+def _dedupe_sorted_points(xs: np.ndarray, ys: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    # Keep the last y when duplicated x exists.
+    uniq_x: List[float] = []
+    uniq_y: List[np.ndarray] = []
+    for x, y in zip(xs, ys):
+        if uniq_x and abs(float(x) - float(uniq_x[-1])) <= 1e-12:
+            uniq_y[-1] = y
+        else:
+            uniq_x.append(float(x))
+            uniq_y.append(y)
+    return np.asarray(uniq_x, dtype=np.float64), np.asarray(uniq_y, dtype=np.float64)
 
-    t0 = float(np.percentile(finite, p0))
-    t1 = float(np.percentile(finite, p1))
-    t2 = float(np.percentile(finite, p2))
-    lo, hi = float(clim[0]), float(clim[1])
-    if not np.isfinite(lo) or not np.isfinite(hi) or hi <= lo:
-        lo, hi = float(np.min(finite)), float(np.max(finite))
-    if hi <= lo:
-        hi = lo + 1.0
 
-    def _to_idx(v: float) -> int:
-        x = (float(v) - lo) / (hi - lo)
-        return int(np.clip(np.round(x * 255.0), 0, 255))
-
-    i0 = _to_idx(t0)
-    i1 = _to_idx(t1)
-    i2 = _to_idx(t2)
-    i0, i1, i2 = sorted([i0, i1, i2])
-
-    # Guard against over-aggressive thresholds that make almost everything transparent.
-    if i0 >= 248:
-        i0, i1, i2 = 176, 220, 246
+def _parse_colour_value(raw) -> np.ndarray:
+    if isinstance(raw, dict):
+        rgb = [float(raw["r"]), float(raw["g"]), float(raw["b"])]
+    elif isinstance(raw, (list, tuple)) and len(raw) >= 3:
+        rgb = [float(raw[0]), float(raw[1]), float(raw[2])]
     else:
-        if i1 <= i0:
-            i1 = min(250, i0 + max(10, (255 - i0) // 4))
-        if i2 <= i1:
-            i2 = min(255, i1 + max(12, (255 - i1) // 2))
+        raise ValueError(f"Invalid colourValue format: {raw}")
+    return np.clip(np.asarray(rgb, dtype=np.float64), 0.0, 1.0)
 
-    opacity = np.zeros((256,), dtype=np.float32)
 
-    def _fill(start: int, end: int, y0: float, y1: float, gamma: float):
-        s = int(np.clip(start, 0, 255))
-        e = int(np.clip(end, 0, 255))
-        if e < s:
-            s, e = e, s
-        if e == s:
-            opacity[s] = max(opacity[s], float(y1))
-            return
-        x = np.linspace(0.0, 1.0, e - s + 1, dtype=np.float32)
-        y = float(y0) + (float(y1) - float(y0)) * np.power(x, float(gamma))
-        opacity[s : e + 1] = np.maximum(opacity[s : e + 1], y)
+def _load_transfer_function_config(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"TransferFunction config not found: {path}")
 
-    # 0~i0: strictly transparent
-    opacity[: i0 + 1] = 0.0
-    # i0~i1: very gentle rise
-    _fill(i0, i1, 0.0, o1, 1.6)
-    # i1~i2: medium rise
-    _fill(i1, i2, o1, o2, 1.4)
-    # i2~255: stronger rise for bright structures
-    _fill(i2, 255, o2, o3, 1.3)
-    # Ensure the brightest bins are always visible.
-    opacity[250:] = np.maximum(opacity[250:], np.linspace(max(o2, 0.12), max(o3, 0.35), 6, dtype=np.float32))
+    with path.open("r", encoding="utf-8") as f:
+        cfg = json.load(f)
 
-    # Final fallback for pathological inputs: ensure non-trivial visible tail.
-    if int(np.count_nonzero(opacity > 1e-6)) < 8:
-        opacity[:] = 0.0
-        _fill(160, 210, 0.0, 0.08, 1.4)
-        _fill(210, 255, 0.08, 0.35, 1.2)
+    alpha_points = cfg.get("alpha_control_points")
+    colour_points = cfg.get("colour_control_points")
+    if not isinstance(alpha_points, list) or len(alpha_points) < 2:
+        raise ValueError("alpha_control_points must be a list with at least 2 points.")
+    if not isinstance(colour_points, list) or len(colour_points) < 2:
+        raise ValueError("colour_control_points must be a list with at least 2 points.")
 
-    opacity = np.clip(opacity, 0.0, 1.0)
-    return opacity.tolist()
+    alpha_x = np.asarray([float(p["dataValue"]) for p in alpha_points], dtype=np.float64)
+    alpha_y = np.asarray([float(p["alphaValue"]) for p in alpha_points], dtype=np.float64)
+    colour_x = np.asarray([float(p["dataValue"]) for p in colour_points], dtype=np.float64)
+    colour_y = np.asarray([_parse_colour_value(p["colourValue"]) for p in colour_points], dtype=np.float64)
+
+    alpha_x = np.clip(alpha_x, 0.0, 1.0)
+    alpha_y = np.clip(alpha_y, 0.0, 1.0)
+    colour_x = np.clip(colour_x, 0.0, 1.0)
+    colour_y = np.clip(colour_y, 0.0, 1.0)
+
+    order_a = np.argsort(alpha_x, kind="mergesort")
+    alpha_x, alpha_y = _dedupe_sorted_points(alpha_x[order_a], alpha_y[order_a])
+    order_c = np.argsort(colour_x, kind="mergesort")
+    colour_x, colour_y = _dedupe_sorted_points(colour_x[order_c], colour_y[order_c])
+
+    if alpha_x.size < 2 or colour_x.size < 2:
+        raise ValueError("Control points become invalid after sorting/deduplication.")
+
+    logger.info(
+        "Loaded TF config '%s': alpha_points=%d, colour_points=%d",
+        path,
+        int(alpha_x.size),
+        int(colour_x.size),
+    )
+    return {
+        "alpha_x": alpha_x,
+        "alpha_y": alpha_y,
+        "colour_x": colour_x,
+        "colour_y": colour_y,
+    }
+
+
+def _build_transfer_function_luts(tf_cfg: Dict[str, np.ndarray], bins: int = 256):
+    # Sample both alpha/color control points onto a fixed LUT. VTK then maps
+    # data values linearly through clim -> [0, 1] -> LUT index.
+    x = np.linspace(0.0, 1.0, int(bins), dtype=np.float64)
+    alpha = np.interp(x, tf_cfg["alpha_x"], tf_cfg["alpha_y"])
+    colour = np.column_stack(
+        [
+            np.interp(x, tf_cfg["colour_x"], tf_cfg["colour_y"][:, 0]),
+            np.interp(x, tf_cfg["colour_x"], tf_cfg["colour_y"][:, 1]),
+            np.interp(x, tf_cfg["colour_x"], tf_cfg["colour_y"][:, 2]),
+        ]
+    )
+    alpha = np.clip(alpha, 0.0, 1.0).astype(np.float32)
+    colour = np.clip(colour, 0.0, 1.0).astype(np.float32)
+    # PyVista expects a matplotlib Colormap object for custom RGB LUTs.
+    colour_cmap = ListedColormap(colour, name="tf_custom")
+    return colour_cmap, alpha.tolist()
+
+
+def _load_shader_source(path: Path, kind: str) -> str:
+    if not path.exists():
+        raise FileNotFoundError(f"{kind} shader not found: {path}")
+    text = path.read_text(encoding="utf-8")
+    if not text.strip():
+        raise ValueError(f"{kind} shader is empty: {path}")
+    return text
+
+
+def _extract_fragment_alpha_cutoff(fragment_source: str) -> float:
+    # Expected patterns from provided shader:
+    # if (accumulatedColor.a >= 0.95) break;
+    # if (gl_FragColor.a < 0.05) discard;
+    m = re.search(r"accumulatedColor\\.a\\s*>=\\s*([0-9]*\\.?[0-9]+)", fragment_source)
+    if m is not None:
+        val = float(m.group(1))
+        return float(np.clip(val, 0.05, 0.999))
+    return 0.95
+
+
+def _extract_fragment_max_steps(fragment_source: str) -> int:
+    m = re.search(r"MAX_STEPS\\s*=\\s*([0-9]+)", fragment_source)
+    if m is not None:
+        return max(16, int(m.group(1)))
+    return 887
+
+
+def _apply_custom_volume_shaders(volume_actor, vertex_source: str, fragment_source: str):
+    # Adapt user-provided WebGL-style shaders onto VTK's volume ray-caster by
+    # injecting logic at shader replacement points.
+    required_vertex_tokens = ("v_nearpos", "v_farpos", "v_position")
+    for token in required_vertex_tokens:
+        if token not in vertex_source:
+            raise ValueError(
+                f"Vertex shader is missing expected token '{token}'. "
+                "Please use shaders/vertexShader.glsl-compatible source."
+            )
+    if "cast_volume" not in fragment_source:
+        raise ValueError(
+            "Fragment shader is missing expected function 'cast_volume'. "
+            "Please use shaders/fragmentShader.glsl-compatible source."
+        )
+
+    alpha_cutoff = _extract_fragment_alpha_cutoff(fragment_source)
+    max_steps_hint = _extract_fragment_max_steps(fragment_source)
+    logger.info(
+        "Applying custom shader pipeline: alpha_cutoff=%.3f, max_steps_hint=%d",
+        alpha_cutoff,
+        max_steps_hint,
+    )
+    shader_property = volume_actor.GetShaderProperty()
+
+    shader_property.ClearAllVertexShaderReplacements()
+    shader_property.ClearAllFragmentShaderReplacements()
+
+    # Vertex adaptation from shaders/vertexShader.glsl:
+    # expose near/far clip positions and object-space vertex position.
+    shader_property.AddVertexShaderReplacement(
+        "//VTK::Base::Dec",
+        True,
+        "//VTK::Base::Dec\nout vec4 v_nearpos;\nout vec4 v_farpos;\nout vec3 v_position;\n",
+        False,
+    )
+    shader_property.AddVertexShaderReplacement(
+        "//VTK::ComputeTextureCoords::Impl",
+        True,
+        "//VTK::ComputeTextureCoords::Impl\n"
+        "  mat4 viewtransformf = in_modelViewMatrix;\n"
+        "  mat4 viewtransformi = inverse(in_modelViewMatrix);\n"
+        "  vec4 position4 = vec4(in_vertexPos, 1.0);\n"
+        "  vec4 pos_in_cam = viewtransformf * position4;\n"
+        "  pos_in_cam.z = -pos_in_cam.w;\n"
+        "  v_nearpos = viewtransformi * pos_in_cam;\n"
+        "  pos_in_cam.z = pos_in_cam.w;\n"
+        "  v_farpos = viewtransformi * pos_in_cam;\n"
+        "  v_position = in_vertexPos;\n",
+        False,
+    )
+
+    # Fragment declarations for varyings and constants sourced from
+    # shaders/fragmentShader.glsl.
+    shader_property.AddFragmentShaderReplacement(
+        "//VTK::Base::Dec",
+        True,
+        "//VTK::Base::Dec\nin vec4 v_nearpos;\nin vec4 v_farpos;\nin vec3 v_position;\n"
+        f"const int USER_MAX_STEPS = {int(max_steps_hint)};\n",
+        False,
+    )
+
+    # Replace VTK's default per-step shading with front-to-back compositing
+    # style from cast_volume() in shaders/fragmentShader.glsl.
+    shader_property.AddFragmentShaderReplacement(
+        "//VTK::Shading::Impl",
+        True,
+        "    if (!g_skip)\n"
+        "    {\n"
+        "      vec4 scalar = texture3D(in_volume[0], g_dataPos);\n"
+        "      scalar = scalar * in_volume_scale[0] + in_volume_bias[0];\n"
+        "      float opacity = computeOpacity(scalar);\n"
+        "      if (opacity > 0.0)\n"
+        "      {\n"
+        "        vec4 sampleColor = computeColor(scalar, opacity);\n"
+        "        sampleColor.rgb *= sampleColor.a;\n"
+        "        g_fragColor.rgb += (1.0 - g_fragColor.a) * sampleColor.rgb;\n"
+        "        g_fragColor.a += (1.0 - g_fragColor.a) * sampleColor.a;\n"
+        f"        if (g_fragColor.a >= {alpha_cutoff:.6f})\n"
+        "        {\n"
+        "          g_exit = true;\n"
+        "        }\n"
+        "      }\n"
+        "    }\n",
+        False,
+    )
 
 
 def _render_volume_views(
     volume_zyx: np.ndarray,
     outdir: Path,
     stem_prefix: str,
-    num_views: int,
     window_size: Tuple[int, int],
     background: str,
-    cmap: str,
+    vertex_shader_source: str,
+    fragment_shader_source: str,
+    tf_colour_cmap: ListedColormap,
+    tf_opacity_lut: List[float],
     low_pct: float,
     high_pct: float,
     opacity_unit_distance: float,
@@ -581,11 +716,13 @@ def _render_volume_views(
     zoom: float,
     up_rotate_deg: float,
 ):
-    pv = _import_pyvista()
+    # Use off-screen rendering so this script can run on headless servers.
     pv.OFF_SCREEN = True
     outdir.mkdir(parents=True, exist_ok=True)
     vol = np.asarray(volume_zyx, dtype=np.float32)
     finite = np.isfinite(vol)
+
+    # Replace NaN/Inf with a robust fill value to avoid transfer-function artifacts.
     if not np.any(finite):
         logger.warning("Volume '%s' has no finite values; rendering zeros.", stem_prefix)
         vol = np.zeros_like(vol, dtype=np.float32)
@@ -593,14 +730,25 @@ def _render_volume_views(
         fill = float(np.nanpercentile(vol[finite], 50.0))
         vol = np.where(finite, vol, fill).astype(np.float32, copy=False)
 
+    # Normalize with fixed global range: global_vmin=-1, global_vmax=1.
+    # Values outside [-1, 1] are clipped after normalization.
+    src_min = float(np.min(vol))
+    src_max = float(np.max(vol))
+    vol = (vol - GLOBAL_VMIN) / (GLOBAL_VMAX - GLOBAL_VMIN)
+    vol = np.clip(vol, 0.0, 1.0).astype(np.float32, copy=False)
+
+    # After normalization, keep clim fixed to [0, 1].
     grid = _volume_to_grid(vol)
-    clim = _compute_clim(vol, low_pct, high_pct)
-    opacity_tf = _build_opacity(vol, clim)
-    center, views, diag = _make_camera_views_from_grid(grid, camera_dist_scale, num_views)
-    opacity_nz = float(np.mean(np.asarray(opacity_tf, dtype=np.float32) > 1e-6))
+    clim = [0.0, 1.0]
+    center, views, diag = _make_camera_views_from_grid(grid, camera_dist_scale)
+    opacity_nz = float(np.mean(np.asarray(tf_opacity_lut, dtype=np.float32) > 1e-6))
     logger.info(
-        "Render '%s': clim=(%.4e, %.4e), opacity_nonzero=%.1f%%",
+        "Render '%s': src_range=(%.4e, %.4e), norm_range=(%.1f, %.1f)->(0,1), clim=(%.1f, %.1f), opacity_nonzero=%.1f%%",
         stem_prefix,
+        src_min,
+        src_max,
+        GLOBAL_VMIN,
+        GLOBAL_VMAX,
         float(clim[0]),
         float(clim[1]),
         100.0 * opacity_nz,
@@ -610,49 +758,36 @@ def _render_volume_views(
     for view_name, cam_pos, cam_up in views:
         plotter = pv.Plotter(off_screen=True, window_size=list(window_size))
         plotter.set_background(str(background))
-        try:
-            plotter.enable_anti_aliasing("fxaa")
-        except Exception:
-            pass
-        try:
-            plotter.enable_depth_peeling()
-        except Exception:
-            pass
-        try:
-            plotter.add_volume(
-                grid,
-                scalars="values",
-                cmap=cmap,
-                opacity="sigmoid",
-                shade=True,
-                clim=clim,
-                show_scalar_bar=False,
-                ambient=0.25,
-                diffuse=0.75,
-                specular=0.25,
-                specular_power=15.0,
-                opacity_unit_distance=float(opacity_unit_distance),
-                blending="composite",
-            )
-        except TypeError:
-            # Fallback for older PyVista versions that may not expose some kwargs.
-            plotter.add_volume(
-                grid,
-                scalars="values",
-                cmap=cmap,
-                opacity=[1.0] * 256,
-                shade=True,
-                clim=clim,
-                show_scalar_bar=False,
-                ambient=0.25,
-                diffuse=0.75,
-                specular=0.25,
-                specular_power=15.0,
-            )
-        try:
-            plotter.reset_camera(bounds=grid.bounds)
-        except Exception:
-            pass
+
+        # Visual quality options: FXAA suppresses jagged edges; depth peeling helps
+        # translucent layers blend in a more stable order.
+        plotter.enable_anti_aliasing("fxaa")
+        plotter.enable_depth_peeling()
+
+        # Build volume actor first, then attach shader-adapted ray marcher.
+        volume_actor = plotter.add_volume(
+            grid,
+            scalars="values",
+            cmap=tf_colour_cmap,
+            opacity=tf_opacity_lut,
+            shade=True,
+            clim=clim,
+            show_scalar_bar=False,
+            ambient=0.25,
+            diffuse=0.75,
+            specular=0.25,
+            specular_power=15.0,
+            opacity_unit_distance=float(opacity_unit_distance),
+            blending="composite",
+        )
+        _apply_custom_volume_shaders(
+            volume_actor=volume_actor,
+            vertex_source=vertex_shader_source,
+            fragment_source=fragment_shader_source,
+        )
+
+        # Start from a grid-aware camera, then enforce our main-view orientation.
+        plotter.reset_camera(bounds=grid.bounds)
         up1 = _rotate_up_around_view(
             cam_pos=cam_pos,
             center=center,
@@ -660,16 +795,14 @@ def _render_volume_views(
             angle_deg=float(up_rotate_deg),
         )
         plotter.camera_position = [cam_pos, center, up1]
-        try:
-            near = max(1e-3, 0.02 * float(diag))
-            far = max(10.0, 4.0 * float(diag))
-            plotter.camera.clipping_range = (near, far)
-        except Exception:
-            pass
-        try:
-            plotter.camera.zoom(float(zoom))
-        except Exception:
-            pass
+
+        # Tie clipping planes to scene size: too narrow clips content, too wide
+        # reduces depth precision and harms translucent composition.
+        near = max(1e-3, 0.02 * float(diag))
+        far = max(10.0, 4.0 * float(diag))
+        plotter.camera.clipping_range = (near, far)
+        plotter.camera.zoom(float(zoom))
+
         logger.info(
             "View '%s' camera_position=%s up_rotate_deg=%.1f",
             view_name,
@@ -683,7 +816,14 @@ def _render_volume_views(
     return outputs
 
 
-def _run_checkpoint_mode(args, cfg):
+def _run_checkpoint_mode(
+    args,
+    cfg,
+    tf_colour_cmap: ListedColormap,
+    tf_opacity_lut: List[float],
+    vertex_shader_source: str,
+    fragment_shader_source: str,
+):
     if not args.checkpoint:
         raise ValueError("--checkpoint is required in --mode checkpoint.")
 
@@ -719,7 +859,7 @@ def _run_checkpoint_mode(args, cfg):
         denorm_stats[name] = _resolve_attr_stats(dataset, payload_dict, name, out_dims[name])
 
     outdir = Path(args.outdir)
-    total_frames = len(times) * len(attrs) * int(args.num_views)
+    total_frames = len(times) * len(attrs)
     pbar = _tqdm(total=total_frames, desc="volume_render_ckpt", leave=True) if _tqdm is not None else None
 
     for t_idx in times:
@@ -741,10 +881,12 @@ def _run_checkpoint_mode(args, cfg):
                 volume_zyx=volumes[attr_name],
                 outdir=outdir,
                 stem_prefix=stem,
-                num_views=int(args.num_views),
                 window_size=(int(args.window_width), int(args.window_height)),
                 background=str(args.background),
-                cmap=str(args.cmap),
+                vertex_shader_source=vertex_shader_source,
+                fragment_shader_source=fragment_shader_source,
+                tf_colour_cmap=tf_colour_cmap,
+                tf_opacity_lut=tf_opacity_lut,
                 low_pct=float(args.clim_low_pct),
                 high_pct=float(args.clim_high_pct),
                 opacity_unit_distance=float(args.opacity_unit_distance),
@@ -753,7 +895,7 @@ def _run_checkpoint_mode(args, cfg):
                 up_rotate_deg=float(args.up_rotate_deg),
             )
             if pbar is not None:
-                pbar.update(int(args.num_views))
+                pbar.update(1)
     if pbar is not None:
         pbar.close()
 
@@ -762,12 +904,19 @@ def _run_checkpoint_mode(args, cfg):
         attrs,
         times[0],
         times[-1] + 1,
-        int(args.num_views),
+        1,
         outdir,
     )
 
 
-def _run_npy_mode(args, cfg):
+def _run_npy_mode(
+    args,
+    cfg,
+    tf_colour_cmap: ListedColormap,
+    tf_opacity_lut: List[float],
+    vertex_shader_source: str,
+    fragment_shader_source: str,
+):
     if not args.npy_files:
         raise ValueError("--npy-files is required in --mode npy.")
     attr_paths = _parse_attr_path_pairs(args.npy_files)
@@ -777,7 +926,7 @@ def _run_npy_mode(args, cfg):
     outdir = Path(args.outdir)
 
     arrays = {name: np.load(str(path), mmap_mode="r") for name, path in attr_paths.items()}
-    total_frames = len(times) * len(arrays) * int(args.num_views)
+    total_frames = len(times) * len(arrays)
     pbar = _tqdm(total=total_frames, desc="volume_render_npy", leave=True) if _tqdm is not None else None
 
     for t_idx in times:
@@ -793,10 +942,12 @@ def _run_npy_mode(args, cfg):
                 volume_zyx=volume,
                 outdir=outdir,
                 stem_prefix=stem,
-                num_views=int(args.num_views),
                 window_size=(int(args.window_width), int(args.window_height)),
                 background=str(args.background),
-                cmap=str(args.cmap),
+                vertex_shader_source=vertex_shader_source,
+                fragment_shader_source=fragment_shader_source,
+                tf_colour_cmap=tf_colour_cmap,
+                tf_opacity_lut=tf_opacity_lut,
                 low_pct=float(args.clim_low_pct),
                 high_pct=float(args.clim_high_pct),
                 opacity_unit_distance=float(args.opacity_unit_distance),
@@ -805,7 +956,7 @@ def _run_npy_mode(args, cfg):
                 up_rotate_deg=float(args.up_rotate_deg),
             )
             if pbar is not None:
-                pbar.update(int(args.num_views))
+                pbar.update(1)
     if pbar is not None:
         pbar.close()
 
@@ -814,7 +965,7 @@ def _run_npy_mode(args, cfg):
         list(arrays.keys()),
         times[0],
         times[-1] + 1,
-        int(args.num_views),
+        1,
         outdir,
     )
 
@@ -823,11 +974,29 @@ def main():
     setup_logging()
     args = _parse_args()
     cfg = load_config(args.config)
+    vertex_shader_source = _load_shader_source(Path(args.vertex_shader), kind="Vertex")
+    fragment_shader_source = _load_shader_source(Path(args.fragment_shader), kind="Fragment")
+    tf_cfg = _load_transfer_function_config(Path(args.tf_config))
+    tf_colour_cmap, tf_opacity_lut = _build_transfer_function_luts(tf_cfg, bins=256)
 
     if args.mode == "checkpoint":
-        _run_checkpoint_mode(args, cfg)
+        _run_checkpoint_mode(
+            args,
+            cfg,
+            tf_colour_cmap=tf_colour_cmap,
+            tf_opacity_lut=tf_opacity_lut,
+            vertex_shader_source=vertex_shader_source,
+            fragment_shader_source=fragment_shader_source,
+        )
     else:
-        _run_npy_mode(args, cfg)
+        _run_npy_mode(
+            args,
+            cfg,
+            tf_colour_cmap=tf_colour_cmap,
+            tf_opacity_lut=tf_opacity_lut,
+            vertex_shader_source=vertex_shader_source,
+            fragment_shader_source=fragment_shader_source,
+        )
 
 
 if __name__ == "__main__":

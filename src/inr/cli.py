@@ -278,13 +278,16 @@ def build_experiment_layout(cfg, model_cfg, data_info):
 def _format_num(num: int) -> str:
     return f"{num:,}"
 
-def _model_size_bytes(model) -> int:
+def _weight_bias_numel(model) -> int:
     total = 0
-    for p in model.parameters():
-        total += p.numel() * p.element_size()
-    for b in model.buffers():
-        total += b.numel() * b.element_size()
+    for name, p in model.named_parameters():
+        if name.endswith("weight") or name.endswith("bias"):
+            total += p.numel()
     return int(total)
+
+def _model_size_bytes(model) -> int:
+    fp16_bytes = 2
+    return _weight_bias_numel(model) * fp16_bytes
 
 def _format_bytes_mb(num_bytes: int) -> str:
     return f"{num_bytes / (1024.0 * 1024.0):.2f} MB"
@@ -354,7 +357,7 @@ def main():
     n_trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     size_bytes = _model_size_bytes(model)
     logger.info(
-        "Model size: params=%s trainable=%s size=%s",
+        "Model size: params=%s trainable=%s size(fp16, weights+bias)=%s",
         _format_num(n_params),
         _format_num(n_trainable),
         _format_bytes_mb(size_bytes),
