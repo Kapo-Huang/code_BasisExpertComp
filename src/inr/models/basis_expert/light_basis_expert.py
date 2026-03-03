@@ -1,9 +1,9 @@
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
-from .components import ExpertEncoder, SirenMLP, ViewGating, PositionalEncoding
+from .components import ExpertEncoder, PositionalEncoding, SirenMLP, ViewGating
 
 
 class LightBasisExpert(nn.Module):
@@ -46,8 +46,6 @@ class LightBasisExpert(nn.Module):
             raise ValueError("top_k must be >= 1")
         if not view_specs:
             raise ValueError("view_specs must be a non-empty dict")
-        if head_num_layers < 2:
-            raise ValueError("head_num_layers must be >= 2")
 
         self.view_names = list(view_specs.keys())
         self.view_dims = dict(view_specs)
@@ -60,7 +58,7 @@ class LightBasisExpert(nn.Module):
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
             num_frequencies=expert_num_frequencies,
-            include_input=True,
+            include_input=False,
         )
         pe_dim = self.pos_enc.out_dim
         self.gating = ViewGating(
@@ -99,17 +97,16 @@ class LightBasisExpert(nn.Module):
             hidden_omega_0=decoder_hidden_omega_0,
         )
 
-        head_hidden_dim = decoder_feature_dim if head_hidden_dim is None else int(head_hidden_dim)
+        # Keep args for backward-compatible config parsing although heads are now linear.
+        _ = (
+            head_hidden_dim,
+            head_num_layers,
+            head_first_omega_0,
+            head_hidden_omega_0,
+        )
         self.heads = nn.ModuleDict(
             {
-                name: SirenMLP(
-                    in_dim=decoder_feature_dim,
-                    out_dim=out_dim,
-                    hidden_dim=head_hidden_dim,
-                    num_layers=head_num_layers,
-                    first_omega_0=head_first_omega_0,
-                    hidden_omega_0=head_hidden_omega_0,
-                )
+                name: nn.Linear(decoder_feature_dim, out_dim)
                 for name, out_dim in self.view_dims.items()
             }
         )

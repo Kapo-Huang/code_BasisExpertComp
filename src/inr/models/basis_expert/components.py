@@ -8,7 +8,7 @@ from ..sota.siren import SineLayer
 
 
 class PositionalEncoding(nn.Module):
-    """NeRF-style positional encoding."""
+    """Learnable Fourier positional encoding (dimension-aligned with legacy PE)."""
 
     def __init__(
         self,
@@ -18,26 +18,22 @@ class PositionalEncoding(nn.Module):
         log_sampling: bool = True,
     ):
         super().__init__()
-        if log_sampling:
-            freq_bands = 2.0 ** torch.arange(num_frequencies) * math.pi
-        else:
-            freq_bands = torch.linspace(1.0, 2.0 ** (num_frequencies - 1), num_frequencies) * math.pi
-        self.register_buffer("freq_bands", freq_bands)
+        _ = log_sampling
+        target_out_dim = in_features * (int(include_input) + 2 * num_frequencies)
+        if target_out_dim % 2 != 0:
+            raise ValueError(f"PositionalEncoding out_dim must be even, got {target_out_dim}.")
+        self.lin = nn.Linear(in_features, target_out_dim // 2, bias=True)
         self.in_features = in_features
         self.include_input = include_input
-        self.out_dim = in_features * (int(include_input) + 2 * num_frequencies)
+        self.out_dim = 2 * self.lin.out_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, in_features)
         return: (B, out_dim)
         """
-        angles = x.unsqueeze(-1) * self.freq_bands
-        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        encoded = encoded.reshape(x.shape[0], -1)
-        if self.include_input:
-            return torch.cat([x, encoded], dim=-1)
-        return encoded
+        u = self.lin(x)
+        return torch.cat([torch.sin(u), torch.cos(u)], dim=-1)
 
 
 class SirenMLP(nn.Module):
@@ -89,6 +85,10 @@ class ExpertEncoder(nn.Module):
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
+        _ = (hidden_dim, first_omega_0, hidden_omega_0)
+        if num_layers < 1:
+            raise ValueError("num_layers must be >= 1")
+
         self.use_positional_encoding = use_positional_encoding
         if use_positional_encoding:
             self.pos_enc = PositionalEncoding(
@@ -101,14 +101,11 @@ class ExpertEncoder(nn.Module):
             self.pos_enc = None
             mlp_in = in_features
 
-        self.mlp = SirenMLP(
-            in_dim=mlp_in,
-            out_dim=feature_dim,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            first_omega_0=first_omega_0,
-            hidden_omega_0=hidden_omega_0,
-        )
+        layers = [nn.Linear(mlp_in, feature_dim)]
+        for _i in range(num_layers - 1):
+            layers.append(nn.ReLU())
+            layers.append(nn.Linear(feature_dim, feature_dim))
+        self.mlp = nn.Sequential(*layers)
         self.out_dim = feature_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
@@ -131,13 +128,11 @@ class ViewGating(nn.Module):
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.gate = SirenMLP(
-            in_dim=in_features + view_embed_dim,
-            out_dim=num_experts,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            first_omega_0=first_omega_0,
-            hidden_omega_0=hidden_omega_0,
+        _ = (num_layers, first_omega_0, hidden_omega_0)
+        self.gate = nn.Sequential(
+            nn.Linear(in_features + view_embed_dim, hidden_dim),
+            nn.ReLU(),
+            nn.Linear(hidden_dim, num_experts),
         )
 
     def forward(self, coords: torch.Tensor, view_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
