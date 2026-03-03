@@ -85,10 +85,6 @@ class ExpertEncoder(nn.Module):
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        _ = (hidden_dim, first_omega_0, hidden_omega_0)
-        if num_layers < 1:
-            raise ValueError("num_layers must be >= 1")
-
         self.use_positional_encoding = use_positional_encoding
         if use_positional_encoding:
             self.pos_enc = PositionalEncoding(
@@ -101,11 +97,14 @@ class ExpertEncoder(nn.Module):
             self.pos_enc = None
             mlp_in = in_features
 
-        layers = [nn.Linear(mlp_in, feature_dim)]
-        for _i in range(num_layers - 1):
-            layers.append(nn.ReLU())
-            layers.append(nn.Linear(feature_dim, feature_dim))
-        self.mlp = nn.Sequential(*layers)
+        self.mlp = SirenMLP(
+            in_dim=mlp_in,
+            out_dim=feature_dim,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            first_omega_0=first_omega_0,
+            hidden_omega_0=hidden_omega_0,
+        )
         self.out_dim = feature_dim
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
