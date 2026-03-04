@@ -1,9 +1,16 @@
+import logging
 from typing import Dict, List, Optional
 
 import torch
 import torch.nn as nn
 
 from .components import ExpertEncoder, PositionalEncoding, SirenMLP, ViewGating
+
+logger = logging.getLogger(__name__)
+
+
+def _count_parameters(module: nn.Module) -> int:
+    return sum(p.numel() for p in module.parameters())
 
 
 class LightBasisExpert(nn.Module):
@@ -22,6 +29,7 @@ class LightBasisExpert(nn.Module):
         expert_feature_dim: int = 128,
         top_k: int = 2,
         view_embed_dim: int = 16,
+        pe_mapping_size: Optional[int] = None,
         expert_num_frequencies: int = 6,
         expert_hidden_dim: int = 128,
         expert_num_layers: int = 3,
@@ -57,6 +65,7 @@ class LightBasisExpert(nn.Module):
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
+            mapping_size=(int(pe_mapping_size) if pe_mapping_size is not None else 0),
             num_frequencies=expert_num_frequencies,
             include_input=False,
         )
@@ -109,6 +118,22 @@ class LightBasisExpert(nn.Module):
                 name: nn.Linear(decoder_feature_dim, out_dim)
                 for name, out_dim in self.view_dims.items()
             }
+        )
+
+        pos_enc_params = _count_parameters(self.pos_enc)
+        view_embedding_params = _count_parameters(self.view_embedding)
+        gating_params = _count_parameters(self.gating)
+        experts_params = _count_parameters(self.experts)
+        decoder_params = _count_parameters(self.decoder)
+        heads_params = _count_parameters(self.heads)
+        logger.info(
+            "LightBasisExpert init params: pos_enc=%s view_embedding=%s gating=%s experts=%s decoder=%s heads=%s",
+            f"{pos_enc_params:,}",
+            f"{view_embedding_params:,}",
+            f"{gating_params:,}",
+            f"{experts_params:,}",
+            f"{decoder_params:,}",
+            f"{heads_params:,}",
         )
 
     def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
@@ -238,10 +263,12 @@ class LightBasisExpert(nn.Module):
 
 def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) -> LightBasisExpert:
     base_dim = cfg.get("base_dim")
+    pe_mapping_raw = cfg.get("pe_mapping_size")
     head_hidden_raw = cfg.get("head_hidden_dim")
     decoder_feature_raw = cfg.get("decoder_feature_dim")
     if base_dim is not None:
         base_dim = int(base_dim)
+        pe_mapping_size = base_dim
         expert_feature_dim = 8 * base_dim
         view_embed_dim = base_dim
         expert_hidden_dim = 8 * base_dim
@@ -254,6 +281,7 @@ def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) 
             int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
         )
     else:
+        pe_mapping_size = int(pe_mapping_raw) if pe_mapping_raw is not None else None
         expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
         view_embed_dim = int(cfg.get("view_embed_dim", 16))
         expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
@@ -272,6 +300,7 @@ def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) 
         expert_feature_dim=expert_feature_dim,
         top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=view_embed_dim,
+        pe_mapping_size=pe_mapping_size,
         expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
         expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),

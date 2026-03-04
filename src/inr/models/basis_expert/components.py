@@ -13,18 +13,24 @@ class PositionalEncoding(nn.Module):
     def __init__(
         self,
         in_features: int,
+        mapping_size: int = 0,
         num_frequencies: int = 6,
         include_input: bool = True,
         log_sampling: bool = True,
     ):
         super().__init__()
         _ = log_sampling
-        target_out_dim = in_features * (int(include_input) + 2 * num_frequencies)
-        if target_out_dim % 2 != 0:
-            raise ValueError(f"PositionalEncoding out_dim must be even, got {target_out_dim}.")
-        self.lin = nn.Linear(in_features, target_out_dim // 2, bias=True)
+        if mapping_size is not None and int(mapping_size) > 0:
+            mapping_size = int(mapping_size)
+        else:
+            target_out_dim = in_features * (int(include_input) + 2 * num_frequencies)
+            if target_out_dim % 2 != 0:
+                raise ValueError(f"PositionalEncoding out_dim must be even, got {target_out_dim}.")
+            mapping_size = target_out_dim // 2
+        self.lin = nn.Linear(in_features, mapping_size, bias=True)
         self.in_features = in_features
         self.include_input = include_input
+        self.mapping_size = mapping_size
         self.out_dim = 2 * self.lin.out_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
