@@ -58,9 +58,8 @@ class SirenMLP(nn.Module):
         assert num_layers >= 2, "num_layers must be >= 2"
 
         layers = [SineLayer(in_dim, hidden_dim, omega_0=first_omega_0, is_first=True)]
-        # for _ in range(num_layers - 2):
-            # layers.append(SineLayer(hidden_dim, hidden_dim, omega_0=hidden_omega_0))
-        layers.append(SineLayer(hidden_dim, hidden_dim, omega_0=hidden_omega_0))
+        for _ in range(num_layers - 2):
+            layers.append(SineLayer(hidden_dim, hidden_dim, omega_0=hidden_omega_0))
         self.mlp = nn.Sequential(*layers)
         self.final = nn.Linear(hidden_dim, out_dim)
 

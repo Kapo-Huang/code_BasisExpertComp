@@ -4,13 +4,56 @@ from typing import Dict, List, Optional
 import torch
 import torch.nn as nn
 
-from .components import ExpertEncoder, PositionalEncoding, SirenMLP, ViewGating
+from ..sota.siren import SineLayer
+from .components import ExpertEncoder, PositionalEncoding, ViewGating
 
 logger = logging.getLogger(__name__)
 
 
 def _count_parameters(module: nn.Module) -> int:
     return sum(p.numel() for p in module.parameters())
+
+
+class DecoderBottleneckResBlock(nn.Module):
+    """Residual bottleneck block: D -> D/2 -> D."""
+
+    def __init__(self, dim: int, omega_0: float = 30.0):
+        super().__init__()
+        bottleneck_dim = max(1, dim // 2)
+        self.down = SineLayer(dim, bottleneck_dim, omega_0=omega_0)
+        self.up = SineLayer(bottleneck_dim, dim, omega_0=omega_0)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return x + self.up(self.down(x))
+
+
+class LightDecoder(nn.Module):
+    """
+    Shared decoder:
+    - proj_in: SineLayer(F -> D)
+    - bottleneck residual blocks on D
+    """
+
+    def __init__(
+        self,
+        in_dim: int,
+        out_dim: int,
+        *,
+        first_omega_0: float = 30.0,
+        hidden_omega_0: float = 30.0,
+        num_res_blocks: int = 1,
+    ):
+        super().__init__()
+        if num_res_blocks < 1:
+            raise ValueError("num_res_blocks must be >= 1")
+        self.proj_in = SineLayer(in_dim, out_dim, is_first=True, omega_0=first_omega_0)
+        self.res_blocks = nn.Sequential(
+            *[DecoderBottleneckResBlock(out_dim, omega_0=hidden_omega_0) for _ in range(num_res_blocks)]
+        )
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        h = self.proj_in(x)
+        return self.res_blocks(h)
 
 
 class LightBasisExpert(nn.Module):
@@ -97,13 +140,13 @@ class LightBasisExpert(nn.Module):
         )
 
         decoder_in_dim = expert_feature_dim
-        self.decoder = SirenMLP(
+        _ = (decoder_hidden_dim, decoder_num_layers)  # legacy args kept for config compatibility
+        self.decoder = LightDecoder(
             in_dim=decoder_in_dim,
             out_dim=decoder_feature_dim,
-            hidden_dim=decoder_hidden_dim,
-            num_layers=decoder_num_layers,
             first_omega_0=decoder_first_omega_0,
             hidden_omega_0=decoder_hidden_omega_0,
+            num_res_blocks=1,
         )
 
         # Keep args for backward-compatible config parsing although heads are now linear.
@@ -263,15 +306,19 @@ class LightBasisExpert(nn.Module):
 
 def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) -> LightBasisExpert:
     base_dim = cfg.get("base_dim")
+    pe_mapping_raw = cfg.get("pe_mapping_size")
     head_hidden_raw = cfg.get("head_hidden_dim")
     decoder_feature_raw = cfg.get("decoder_feature_dim")
+    if base_dim is None:
+        raise ValueError("light_basis_expert requires 'base_dim' in model config.")
+
     base_dim = int(base_dim)
-    pe_mapping_size = base_dim
-    expert_feature_dim = 8 * base_dim
-    view_embed_dim = base_dim
-    expert_hidden_dim = 4 * base_dim
-    gate_hidden_dim = 8 * base_dim
-    decoder_hidden_dim = 8 * base_dim
+    pe_mapping_size = int(pe_mapping_raw) if pe_mapping_raw is not None else base_dim
+    expert_feature_dim = int(cfg.get("expert_feature_dim", 8 * base_dim))
+    view_embed_dim = int(cfg.get("view_embed_dim", base_dim))
+    expert_hidden_dim = int(cfg.get("expert_hidden_dim", 4 * base_dim))
+    gate_hidden_dim = int(cfg.get("gate_hidden_dim", 8 * base_dim))
+    decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 8 * base_dim))
     decoder_feature_dim = (
         int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
     )
