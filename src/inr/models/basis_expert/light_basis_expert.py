@@ -73,7 +73,6 @@ class LightBasisExpert(nn.Module):
         top_k: int = 2,
         view_embed_dim: int = 16,
         pe_mapping_size: Optional[int] = None,
-        expert_num_frequencies: int = 6,
         expert_hidden_dim: int = 128,
         expert_num_layers: int = 3,
         gate_hidden_dim: int = 128,
@@ -106,9 +105,7 @@ class LightBasisExpert(nn.Module):
         self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
-        resolved_pe_mapping_size = (
-            int(pe_mapping_size) if pe_mapping_size is not None else int(in_features * expert_num_frequencies)
-        )
+        resolved_pe_mapping_size = int(pe_mapping_size) if pe_mapping_size is not None else int(in_features)
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
             mapping_size=resolved_pe_mapping_size,
@@ -130,7 +127,6 @@ class LightBasisExpert(nn.Module):
                     in_features=pe_dim,
                     feature_dim=expert_feature_dim,
                     use_positional_encoding=False,
-                    num_frequencies=expert_num_frequencies,
                     hidden_dim=expert_hidden_dim,
                     num_layers=expert_num_layers,
                     first_omega_0=expert_first_omega_0,
@@ -334,7 +330,6 @@ def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) 
         top_k=int(cfg.get("top_k", 2)),
         view_embed_dim=view_embed_dim,
         pe_mapping_size=pe_mapping_size,
-        expert_num_frequencies=int(cfg.get("expert_num_frequencies", 6)),
         expert_hidden_dim=expert_hidden_dim,
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
         gate_hidden_dim=gate_hidden_dim,
