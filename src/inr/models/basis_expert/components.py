@@ -127,11 +127,13 @@ class ViewGating(nn.Module):
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        _ = (num_layers, first_omega_0, hidden_omega_0)
-        self.gate = nn.Sequential(
-            nn.Linear(in_features + view_embed_dim, hidden_dim),
-            nn.ReLU(),
-            nn.Linear(hidden_dim, num_experts),
+        self.gate = SirenMLP(
+            in_dim=in_features + view_embed_dim,
+            out_dim=num_experts,
+            hidden_dim=hidden_dim,
+            num_layers=num_layers,
+            first_omega_0=first_omega_0,
+            hidden_omega_0=hidden_omega_0,
         )
 
     def forward(self, coords: torch.Tensor, view_embed: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor]:
