@@ -106,11 +106,12 @@ class LightBasisExpert(nn.Module):
         self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
+        resolved_pe_mapping_size = (
+            int(pe_mapping_size) if pe_mapping_size is not None else int(in_features * expert_num_frequencies)
+        )
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
-            mapping_size=(int(pe_mapping_size) if pe_mapping_size is not None else 0),
-            num_frequencies=expert_num_frequencies,
-            include_input=False,
+            mapping_size=resolved_pe_mapping_size,
         )
         pe_dim = self.pos_enc.out_dim
         self.gating = ViewGating(

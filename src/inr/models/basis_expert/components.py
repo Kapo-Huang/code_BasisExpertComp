@@ -7,31 +7,56 @@ import torch.nn as nn
 from ..sota.siren import SineLayer
 
 
-class PositionalEncoding(nn.Module):
-    """Learnable Fourier positional encoding (dimension-aligned with legacy PE)."""
+# class PositionalEncoding(nn.Module):
+#     """Learnable Fourier positional encoding (dimension-aligned with legacy PE)."""
 
+#     def __init__(
+#         self,
+#         in_features: int,
+#         mapping_size: int = 0,
+#         num_frequencies: int = 6,
+#         include_input: bool = True,
+#         log_sampling: bool = True,
+#     ):
+#         super().__init__()
+#         _ = log_sampling
+#         if mapping_size is not None and int(mapping_size) > 0:
+#             mapping_size = int(mapping_size)
+#         else:
+#             target_out_dim = in_features * (int(include_input) + 2 * num_frequencies)
+#             if target_out_dim % 2 != 0:
+#                 raise ValueError(f"PositionalEncoding out_dim must be even, got {target_out_dim}.")
+#             mapping_size = target_out_dim // 2
+#         self.lin = nn.Linear(in_features, mapping_size, bias=True)
+#         self.in_features = in_features
+#         self.include_input = include_input
+#         self.mapping_size = mapping_size
+#         self.out_dim = 2 * self.lin.out_features
+
+#     def forward(self, x: torch.Tensor) -> torch.Tensor:
+#         """
+#         x: (B, in_features)
+#         return: (B, out_dim)
+#         """
+#         u = self.lin(x)
+#         return torch.cat([torch.sin(u), torch.cos(u)], dim=-1)
+
+class PositionalEncoding(nn.Module):
+    """Learnable Fourier positional encoding."""
     def __init__(
         self,
         in_features: int,
-        mapping_size: int = 0,
-        num_frequencies: int = 6,
-        include_input: bool = True,
-        log_sampling: bool = True,
+        mapping_size: int,
     ):
         super().__init__()
-        _ = log_sampling
-        if mapping_size is not None and int(mapping_size) > 0:
-            mapping_size = int(mapping_size)
-        else:
-            target_out_dim = in_features * (int(include_input) + 2 * num_frequencies)
-            if target_out_dim % 2 != 0:
-                raise ValueError(f"PositionalEncoding out_dim must be even, got {target_out_dim}.")
-            mapping_size = target_out_dim // 2
-        self.lin = nn.Linear(in_features, mapping_size, bias=True)
+        if int(mapping_size) <= 0:
+            raise ValueError("mapping_size must be > 0")
         self.in_features = in_features
-        self.include_input = include_input
-        self.mapping_size = mapping_size
-        self.out_dim = 2 * self.lin.out_features
+        self.lin = nn.Linear(in_features, int(mapping_size), bias=True)
+
+    @property
+    def out_dim(self) -> int:
+        return 2 * self.lin.out_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
@@ -92,10 +117,10 @@ class ExpertEncoder(nn.Module):
         super().__init__()
         self.use_positional_encoding = use_positional_encoding
         if use_positional_encoding:
+            mapping_size = in_features * (int(include_input) + 2 * num_frequencies) // 2
             self.pos_enc = PositionalEncoding(
                 in_features=in_features,
-                num_frequencies=num_frequencies,
-                include_input=include_input,
+                mapping_size=mapping_size,
             )
             mlp_in = self.pos_enc.out_dim
         else:

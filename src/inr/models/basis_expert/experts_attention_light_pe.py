@@ -82,10 +82,10 @@ class BasisExpertsAttentionLightPE(nn.Module):
         self.expert_feature_dim = expert_feature_dim
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
+        pe_mapping_size = in_features * (1 + 2 * expert_num_frequencies) // 2
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
-            num_frequencies=expert_num_frequencies,
-            include_input=True,
+            mapping_size=pe_mapping_size,
         )
         pe_dim = self.pos_enc.out_dim
         # self.view_embed_proj = nn.Linear(view_embed_dim, expert_feature_dim, bias=False)
