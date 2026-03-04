@@ -128,30 +128,41 @@ class LightBasisExpert(nn.Module):
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
         x_pe = self.pos_enc(coords)
-        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
-
-        preds = {}
+        # Stage 1: run router first to identify top-k experts per view.
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
-        h_views: List[torch.Tensor] = []
-        shared_feats: List[torch.Tensor] = []
-
-        for view_idx, name in enumerate(self.view_names):
+        for view_idx, _name in enumerate(self.view_names):
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
             probs, _ = self.gating(x_pe, view_embed)
             mask = self._topk_mask(probs)
+            probs_list.append(probs)
+            masks_list.append(mask)
+
+        # Stage 2: only evaluate experts selected by at least one router top-k decision.
+        masks_tensor = torch.stack(masks_list, dim=1)  # (B, V, M)
+        selected_union = masks_tensor.amax(dim=1) > 0  # (B, M)
+        expert_feats = x_pe.new_zeros((x_pe.shape[0], self.num_experts, self.expert_feature_dim))
+        for expert_idx, expert in enumerate(self.experts):
+            active_mask = selected_union[:, expert_idx]
+            if active_mask.any():
+                expert_feats[active_mask, expert_idx] = expert(x_pe[active_mask])
+
+        preds = {}
+        h_views: List[torch.Tensor] = []
+        shared_feats: List[torch.Tensor] = []
+
+        for name, probs, mask in zip(self.view_names, probs_list, masks_list):
             masked_probs = probs * mask
-            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
-            weights = masked_probs if hard_topk else probs
+            # Keep sparse compute in both modes: only top-k experts are evaluated.
+            _ = hard_topk
+            weights = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
 
             h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
             decoder_in = h_v
             shared_feat = self.decoder(decoder_in)
             preds[name] = self.heads[name](shared_feat)
 
-            probs_list.append(probs)
-            masks_list.append(mask)
             h_views.append(h_v)
             shared_feats.append(shared_feat)
 
