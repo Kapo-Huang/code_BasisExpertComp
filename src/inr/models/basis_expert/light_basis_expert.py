@@ -263,36 +263,21 @@ class LightBasisExpert(nn.Module):
 
 def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) -> LightBasisExpert:
     base_dim = cfg.get("base_dim")
-    pe_mapping_raw = cfg.get("pe_mapping_size")
     head_hidden_raw = cfg.get("head_hidden_dim")
     decoder_feature_raw = cfg.get("decoder_feature_dim")
-    if base_dim is not None:
-        base_dim = int(base_dim)
-        pe_mapping_size = base_dim
-        expert_feature_dim = 8 * base_dim
-        view_embed_dim = base_dim
-        expert_hidden_dim = 8 * base_dim
-        gate_hidden_dim = 8 * base_dim
-        decoder_hidden_dim = 8 * base_dim
-        decoder_feature_dim = (
-            int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
-        )
-        head_hidden_dim = (
-            int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
-        )
-    else:
-        pe_mapping_size = int(pe_mapping_raw) if pe_mapping_raw is not None else None
-        expert_feature_dim = int(cfg.get("expert_feature_dim", 128))
-        view_embed_dim = int(cfg.get("view_embed_dim", 16))
-        expert_hidden_dim = int(cfg.get("expert_hidden_dim", 128))
-        gate_hidden_dim = int(cfg.get("gate_hidden_dim", 128))
-        decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 128))
-        decoder_feature_dim = (
-            int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
-        )
-        head_hidden_dim = (
-            int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
-        )
+    base_dim = int(base_dim)
+    pe_mapping_size = base_dim
+    expert_feature_dim = 8 * base_dim
+    view_embed_dim = base_dim
+    expert_hidden_dim = 4 * base_dim
+    gate_hidden_dim = 8 * base_dim
+    decoder_hidden_dim = 8 * base_dim
+    decoder_feature_dim = (
+        int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
+    )
+    head_hidden_dim = (
+        int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
+    )
     return LightBasisExpert(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,

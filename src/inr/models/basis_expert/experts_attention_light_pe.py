@@ -271,7 +271,7 @@ def build_basisExperts_attention_light_pe_from_config(
         expert_feature_dim = 8 * base_dim
         view_embed_dim = base_dim
         expert_hidden_dim = 8 * base_dim
-        gate_hidden_dim = 8 * base_dim
+        gate_hidden_dim = 4 * base_dim
         decoder_hidden_dim = 8 * base_dim
     else:
         expert_feature_dim = int(cfg.get("expert_feature_dim", 128))

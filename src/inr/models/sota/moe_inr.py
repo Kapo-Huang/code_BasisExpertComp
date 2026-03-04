@@ -134,21 +134,11 @@ class SharedSirenEncoder(nn.Module):
         super().__init__()
         if include_input:
             raise ValueError("Learnable Fourier PE does not support include_input=True.")
-
-        if base_dim is not None:
-            target_pos_dim = 2 * base_dim
-            pe_mapping_dim = base_dim
-            sine1_dim = 4 * base_dim
-            sine2_dim = 8 * base_dim
-            res_dim = 8 * base_dim
-        else:
-            target_pos_dim = in_features * (int(include_input) + 2 * num_frequencies)
-            if target_pos_dim % 2 != 0:
-                raise ValueError(f"Positional encoding out_dim must be even, got {target_pos_dim}.")
-            pe_mapping_dim = target_pos_dim // 2
-            sine1_dim = feature_dim
-            sine2_dim = feature_dim
-            res_dim = feature_dim
+        target_pos_dim = 2 * base_dim
+        pe_mapping_dim = base_dim
+        sine1_dim = 4 * base_dim
+        sine2_dim = 8 * base_dim
+        res_dim = 8 * base_dim
 
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
