@@ -7,7 +7,6 @@ import torch.nn as nn
 from ..sota.siren import SineLayer
 from .components import (
     ExpertEncoder,
-    PackedSirenExperts,
     PositionalEncoding,
     SmallMLPHead,
     ViewGating,
@@ -127,7 +126,7 @@ class LightBasisExpert(nn.Module):
             hidden_omega_0=gate_hidden_omega_0,
         )
 
-        experts_list = nn.ModuleList(
+        self.experts = nn.ModuleList(
             [
                 ExpertEncoder(
                     in_features=pe_dim,
@@ -141,7 +140,6 @@ class LightBasisExpert(nn.Module):
                 for _ in range(num_experts)
             ]
         )
-        self.experts = PackedSirenExperts.from_expert_list(experts_list)
 
         decoder_in_dim = self.expert_feature_dim
         self.decoder = LightDecoder(
@@ -192,7 +190,7 @@ class LightBasisExpert(nn.Module):
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
         x_pe = self.pos_enc(coords)
-        expert_feats = self.experts(x_pe)  # (B, M, F)
+        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
 
         preds = {}
         probs_list: List[torch.Tensor] = []
@@ -246,7 +244,7 @@ class LightBasisExpert(nn.Module):
 
     def pretrain_teacher_shared_feat(self, coords: torch.Tensor, teacher_mode: str = "random_topk"):
         x_pe = self.pos_enc(coords)
-        expert_feats = self.experts(x_pe)  # (B, M, F)
+        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
         mode = (teacher_mode or "uniform").strip().lower()
         if mode == "uniform":
             weights = torch.full(
@@ -275,14 +273,14 @@ class LightBasisExpert(nn.Module):
 
     def pretrain_stage1_expert_feats(self, coords: torch.Tensor) -> torch.Tensor:
         x_pe = self.pos_enc(coords)
-        return self.experts(x_pe)
+        return torch.stack([expert(x_pe) for expert in self.experts], dim=1)
 
     def pretrain_stage2_parameters(self):
         return list(self.gating.parameters()) + list(self.view_embedding.parameters())
 
     def pretrain_stage2_router(self, coords: torch.Tensor, temperature: float = 1.0):
         x_pe = self.pos_enc(coords)
-        expert_feats = self.experts(x_pe)
+        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)
         probs_list: List[torch.Tensor] = []
         masks_list: List[torch.Tensor] = []
         for view_idx in range(self.num_views):
