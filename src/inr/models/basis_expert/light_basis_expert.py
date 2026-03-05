@@ -5,7 +5,7 @@ import torch
 import torch.nn as nn
 
 from ..sota.siren import SineLayer
-from .components import ExpertEncoder, PositionalEncoding, ViewGating
+from .components import ExpertEncoder, PositionalEncoding, SmallMLPHead, ViewGating
 
 logger = logging.getLogger(__name__)
 
@@ -78,18 +78,13 @@ class LightBasisExpert(nn.Module):
         gate_hidden_dim: int = 128,
         gate_num_layers: int = 3,
         decoder_feature_dim: int = 128,
-        decoder_hidden_dim: int = 128,
-        decoder_num_layers: int = 3,
-        head_hidden_dim: Optional[int] = None,
-        head_num_layers: int = 2,
+        decoder_num_res_blocks: int = 1,
         expert_first_omega_0: float = 30.0,
         expert_hidden_omega_0: float = 30.0,
         gate_first_omega_0: float = 30.0,
         gate_hidden_omega_0: float = 30.0,
         decoder_first_omega_0: float = 30.0,
         decoder_hidden_omega_0: float = 30.0,
-        head_first_omega_0: float = 30.0,
-        head_hidden_omega_0: float = 30.0,
     ):
         super().__init__()
         if top_k < 1:
@@ -102,7 +97,12 @@ class LightBasisExpert(nn.Module):
         self.num_views = len(self.view_names)
         self.num_experts = num_experts
         self.top_k = min(top_k, num_experts)
-        self.expert_feature_dim = expert_feature_dim
+        self.expert_feature_dim = int(expert_feature_dim)
+        self.decoder_feature_dim = int(decoder_feature_dim)
+        if self.expert_feature_dim < 1:
+            raise ValueError("expert_feature_dim must be >= 1")
+        if self.decoder_feature_dim < 1:
+            raise ValueError("decoder_feature_dim must be >= 1")
 
         self.view_embedding = nn.Embedding(self.num_views, view_embed_dim)
         resolved_pe_mapping_size = int(pe_mapping_size) if pe_mapping_size is not None else int(in_features)
@@ -136,26 +136,18 @@ class LightBasisExpert(nn.Module):
             ]
         )
 
-        decoder_in_dim = expert_feature_dim
-        _ = (decoder_hidden_dim, decoder_num_layers)  # legacy args kept for config compatibility
+        decoder_in_dim = self.expert_feature_dim
         self.decoder = LightDecoder(
             in_dim=decoder_in_dim,
-            out_dim=decoder_feature_dim,
+            out_dim=self.decoder_feature_dim,
             first_omega_0=decoder_first_omega_0,
             hidden_omega_0=decoder_hidden_omega_0,
-            num_res_blocks=1,
+            num_res_blocks=int(decoder_num_res_blocks),
         )
 
-        # Keep args for backward-compatible config parsing although heads are now linear.
-        _ = (
-            head_hidden_dim,
-            head_num_layers,
-            head_first_omega_0,
-            head_hidden_omega_0,
-        )
         self.heads = nn.ModuleDict(
             {
-                name: nn.Linear(decoder_feature_dim, out_dim)
+                name: SmallMLPHead(self.decoder_feature_dim, out_dim)
                 for name, out_dim in self.view_dims.items()
             }
         )
@@ -302,26 +294,23 @@ class LightBasisExpert(nn.Module):
 
 
 def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) -> LightBasisExpert:
-    base_dim = cfg.get("base_dim")
-    pe_mapping_raw = cfg.get("pe_mapping_size")
-    head_hidden_raw = cfg.get("head_hidden_dim")
-    decoder_feature_raw = cfg.get("decoder_feature_dim")
-    if base_dim is None:
+    base_dim_raw = cfg.get("base_dim")
+    if base_dim_raw is None:
         raise ValueError("light_basis_expert requires 'base_dim' in model config.")
 
-    base_dim = int(base_dim)
+    base_dim = int(base_dim_raw)
+    pe_mapping_raw = cfg.get("pe_mapping_size")
+    decoder_feature_raw = cfg.get("decoder_feature_dim")
+
     pe_mapping_size = int(pe_mapping_raw) if pe_mapping_raw is not None else base_dim
     expert_feature_dim = int(cfg.get("expert_feature_dim", 8 * base_dim))
     view_embed_dim = int(cfg.get("view_embed_dim", base_dim))
     expert_hidden_dim = int(cfg.get("expert_hidden_dim", 4 * base_dim))
     gate_hidden_dim = int(cfg.get("gate_hidden_dim", 8 * base_dim))
-    decoder_hidden_dim = int(cfg.get("decoder_hidden_dim", 8 * base_dim))
     decoder_feature_dim = (
         int(decoder_feature_raw) if decoder_feature_raw is not None else expert_feature_dim
     )
-    head_hidden_dim = (
-        int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
-    )
+    decoder_num_res_blocks = int(cfg.get("decoder_num_res_blocks", 1))
     return LightBasisExpert(
         in_features=int(cfg.get("in_features", 4)),
         view_specs=view_specs,
@@ -335,16 +324,11 @@ def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) 
         gate_hidden_dim=gate_hidden_dim,
         gate_num_layers=int(cfg.get("gate_num_layers", 3)),
         decoder_feature_dim=decoder_feature_dim,
-        decoder_hidden_dim=decoder_hidden_dim,
-        decoder_num_layers=int(cfg.get("decoder_num_layers", 3)),
-        head_hidden_dim=head_hidden_dim,
-        head_num_layers=int(cfg.get("head_num_layers", 2)),
+        decoder_num_res_blocks=decoder_num_res_blocks,
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
         gate_first_omega_0=float(cfg.get("gate_first_omega_0", 30.0)),
         gate_hidden_omega_0=float(cfg.get("gate_hidden_omega_0", 30.0)),
         decoder_first_omega_0=float(cfg.get("decoder_first_omega_0", 30.0)),
         decoder_hidden_omega_0=float(cfg.get("decoder_hidden_omega_0", 30.0)),
-        head_first_omega_0=float(cfg.get("head_first_omega_0", 30.0)),
-        head_hidden_omega_0=float(cfg.get("head_hidden_omega_0", 30.0)),
     )

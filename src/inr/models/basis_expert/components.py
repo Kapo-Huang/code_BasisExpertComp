@@ -99,6 +99,20 @@ class SirenMLP(nn.Module):
         return self.final(h)
 
 
+class SmallMLPHead(nn.Module):
+    """Two-layer lightweight head: Linear -> ReLU -> Linear."""
+
+    def __init__(self, in_dim: int, out_dim: int):
+        super().__init__()
+        hidden = max(8, int(in_dim // 4))
+        self.fc1 = nn.Linear(in_dim, hidden)
+        self.act = nn.ReLU()
+        self.fc2 = nn.Linear(hidden, out_dim)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        return self.fc2(self.act(self.fc1(x)))
+
+
 class ExpertEncoder(nn.Module):
     """Expert encoder that maps coords to latent features."""
 
