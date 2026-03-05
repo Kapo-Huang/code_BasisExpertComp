@@ -297,26 +297,28 @@ def _resolve_base_dataset(ds: Dataset):
     return ds.dataset if isinstance(ds, Subset) else ds
 
 
-class TimeStepRandomSampler(Sampler[int]):
+class TimeStepRandomBatchSampler(Sampler[list]):
     def __init__(
         self,
         dataset: Dataset,
         volume_shape,
         total_samples_budget: int,
+        batch_size: int,
         generator=None,
         active_timesteps: Optional[int] = None,
     ):
         self.dataset = dataset
         self.volume_shape = volume_shape
         self.total_samples_budget = int(total_samples_budget)
+        self.batch_size = int(batch_size)
+        self.generator = generator
+
         self.samples_per_timestep = 0
         self.total_samples = 0
         self._active_timesteps = None
         self._active_indices = None
-        self.set_active_timesteps(active_timesteps)
-        self.generator = generator
-
         self._per_t_indices = None
+
         if isinstance(dataset, Subset):
             indices = np.asarray(dataset.indices, dtype=np.int64)
             V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
@@ -327,6 +329,7 @@ class TimeStepRandomSampler(Sampler[int]):
                 if not np.any(mask):
                     raise ValueError(f"Subset has no samples for timestep t={ti}")
                 self._per_t_indices.append(indices[mask])
+        self.set_active_timesteps(active_timesteps)
 
     @property
     def active_timesteps(self) -> Optional[int]:
@@ -371,55 +374,52 @@ class TimeStepRandomSampler(Sampler[int]):
         self._set_active_count(len(self._active_indices))
 
     def __iter__(self):
-        V = int(self.volume_shape.X) * int(self.volume_shape.Y) * int(self.volume_shape.Z)
+        X = int(self.volume_shape.X)
+        Y = int(self.volume_shape.Y)
+        Z = int(self.volume_shape.Z)
+        V = X * Y * Z
         T = int(self.volume_shape.T)
-        active_indices = None
+
         if self._active_indices is not None:
             active_indices = [t for t in self._active_indices if 0 <= t < T]
         elif self._active_timesteps is not None:
-            active_T = min(self._active_timesteps, T)
-            active_indices = list(range(active_T))
+            active_indices = list(range(min(self._active_timesteps, T)))
         else:
             active_indices = list(range(T))
+
         if not active_indices:
             return
 
         active_tensor = torch.tensor(active_indices, dtype=torch.long)
+
         total = int(self.total_samples)
-        chunk_size = 1_000_000
-        remaining = total
-        while remaining > 0:
-            cur = min(chunk_size, remaining)
-            t_choice = torch.randint(0, len(active_indices), (cur,), generator=self.generator)
+        bs = self.batch_size
+        n_batches = total // bs
+        if n_batches <= 0:
+            return
+
+        for _ in range(n_batches):
+            t_choice = torch.randint(0, len(active_indices), (bs,), generator=self.generator)
             t_vals = active_tensor[t_choice]
+
             if self._per_t_indices is None:
-                offsets = torch.randint(0, V, (cur,), generator=self.generator)
-                indices = t_vals * V + offsets
-                for idx in indices.tolist():
-                    yield int(idx)
+                offsets = torch.randint(0, V, (bs,), generator=self.generator)
+                batch_idx = (t_vals * V + offsets).cpu().numpy().astype(np.int64, copy=False)
+                yield batch_idx
             else:
                 t_vals_np = t_vals.cpu().numpy()
-                out = np.empty(cur, dtype=np.int64)
+                out = np.empty(bs, dtype=np.int64)
                 for t in np.unique(t_vals_np):
                     pos = np.where(t_vals_np == t)[0]
                     pool = self._per_t_indices[int(t)]
                     picks = torch.randint(0, len(pool), (len(pos),), generator=self.generator).cpu().numpy()
                     out[pos] = pool[picks]
-                for idx in out.tolist():
-                    yield int(idx)
-            remaining -= cur
+                yield out
 
-    # def __len__(self) -> int:
-    #     return self.total_samples
     def __len__(self) -> int:
-        T = int(self.volume_shape.T)
-        if self._active_indices is not None:
-            active = len([t for t in self._active_indices if 0 <= t < T])
-        elif self._active_timesteps is not None:
-            active = min(int(self._active_timesteps), T)
-        else:
-            active = T
-        return self.samples_per_timestep * active
+        total = int(self.total_samples)
+        bs = int(self.batch_size)
+        return total // max(bs, 1)
 
 
 
@@ -492,13 +492,18 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     else:
         raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
 
-    sampler = None
+    batch_sampler = None
     shuffle = True
     if cfg.batches_per_epoch_budget > 0:
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
         total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.pretrain.batch_size)
-        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, total_samples_budget)
+        batch_sampler = TimeStepRandomBatchSampler(
+            dataset,
+            base_ds.volume_shape,
+            total_samples_budget,
+            batch_size=cfg.pretrain.batch_size,
+        )
         shuffle = False
 
     pretrain_kwargs = {
@@ -509,11 +514,17 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     }
     if cfg.num_workers > 0:
         pretrain_kwargs["prefetch_factor"] = 4
+    if batch_sampler is not None:
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            shuffle=False,
+            **pretrain_kwargs,
+        )
     return DataLoader(
         dataset,
         batch_size=cfg.pretrain.batch_size,
         shuffle=shuffle,
-        sampler=sampler,
         **pretrain_kwargs,
     )
 
@@ -527,13 +538,18 @@ def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> Data
     else:
         raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
 
-    sampler = None
+    batch_sampler = None
     shuffle = True
     if cfg.batches_per_epoch_budget > 0:
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
         total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.pretrain.batch_size)
-        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, total_samples_budget)
+        batch_sampler = TimeStepRandomBatchSampler(
+            dataset,
+            base_ds.volume_shape,
+            total_samples_budget,
+            batch_size=cfg.pretrain.batch_size,
+        )
         shuffle = False
 
     pretrain_kwargs = {
@@ -544,11 +560,17 @@ def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> Data
     }
     if cfg.num_workers > 0:
         pretrain_kwargs["prefetch_factor"] = 4
+    if batch_sampler is not None:
+        return DataLoader(
+            dataset,
+            batch_sampler=batch_sampler,
+            shuffle=False,
+            **pretrain_kwargs,
+        )
     return DataLoader(
         dataset,
         batch_size=cfg.pretrain.batch_size,
         shuffle=shuffle,
-        sampler=sampler,
         **pretrain_kwargs,
     )
 
@@ -763,14 +785,19 @@ def build_dataloaders(
     train_ds, val_ds = dataset, None
 
     train_collate = _resolve_collate(train_ds)
-    sampler = None
+    batch_sampler = None
     shuffle = True
     if cfg.batches_per_epoch_budget > 0:
         base_ds = _resolve_base_dataset(train_ds)
         if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
             raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
         total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.batch_size)
-        sampler = TimeStepRandomSampler(train_ds, base_ds.volume_shape, total_samples_budget)
+        batch_sampler = TimeStepRandomBatchSampler(
+            train_ds,
+            base_ds.volume_shape,
+            total_samples_budget,
+            batch_size=cfg.batch_size,
+        )
         shuffle = False
     train_kwargs = {
         "pin_memory": True,
@@ -781,13 +808,20 @@ def build_dataloaders(
         train_kwargs["prefetch_factor"] = 4
     if train_collate is not None:
         train_kwargs["collate_fn"] = train_collate
-    train_loader = DataLoader(
-        train_ds,
-        batch_size=cfg.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        **train_kwargs,
-    )
+    if batch_sampler is not None:
+        train_loader = DataLoader(
+            train_ds,
+            batch_sampler=batch_sampler,
+            shuffle=False,
+            **train_kwargs,
+        )
+    else:
+        train_loader = DataLoader(
+            train_ds,
+            batch_size=cfg.batch_size,
+            shuffle=shuffle,
+            **train_kwargs,
+        )
     val_loader = None
     if val_ds is not None:
         val_collate = _resolve_collate(val_ds)
@@ -866,8 +900,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     best_state = None
     no_improve = 0
     expert_select_counts = None
-    sampler = getattr(train_loader, "sampler", None)
-    timestep_sampler = sampler if isinstance(sampler, TimeStepRandomSampler) else None
+    train_batch_sampler = getattr(train_loader, "batch_sampler", None)
+    timestep_sampler = (
+        train_batch_sampler if isinstance(train_batch_sampler, TimeStepRandomBatchSampler) else None
+    )
     total_timesteps = None
     last_active_timesteps = None
     last_stride_groups = None
