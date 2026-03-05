@@ -184,41 +184,43 @@ class LightBasisExpert(nn.Module):
         if request is not None and request not in self.view_dims:
             raise KeyError(f"Unknown view '{request}'. Available: {list(self.view_dims.keys())}")
 
+        B = coords.shape[0]
+        V = self.num_views
+        M = self.num_experts
+
         x_pe = self.pos_enc(coords)
         expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
 
+        view_ids = torch.arange(V, device=coords.device, dtype=torch.long)
+        view_embed = self.view_embedding(view_ids).unsqueeze(0).expand(B, V, -1)  # (B, V, E)
+        x_pe_v = x_pe.unsqueeze(1).expand(B, V, -1)  # (B, V, pe_dim)
+        gate_in = torch.cat([x_pe_v, view_embed], dim=-1).reshape(B * V, -1)  # (B*V, pe_dim+E)
+
+        logits = self.gating.gate(gate_in)
+        probs = torch.softmax(logits, dim=-1).reshape(B, V, M)
+
+        topk_idx = torch.topk(probs, k=self.top_k, dim=-1).indices  # (B, V, K)
+        masks = torch.zeros_like(probs).scatter_(-1, topk_idx, 1.0)  # (B, V, M)
+        if hard_topk:
+            weights = probs * masks
+            weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-9)  # (B, V, M)
+        else:
+            weights = probs
+
+        H_views = torch.einsum("bmf,bvm->bvf", expert_feats, weights)
+        H_shared = self.decoder(H_views.reshape(B * V, -1)).reshape(B, V, -1)
+
         preds = {}
-        probs_list: List[torch.Tensor] = []
-        masks_list: List[torch.Tensor] = []
-        h_views: List[torch.Tensor] = []
-        shared_feats: List[torch.Tensor] = []
-
         for view_idx, name in enumerate(self.view_names):
-            view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
-            view_embed = self.view_embedding(view_ids)
-            probs, _ = self.gating(x_pe, view_embed)
-            mask = self._topk_mask(probs)
-            masked_probs = probs * mask
-            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
-            weights = masked_probs if hard_topk else probs
-
-            h_v = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-            decoder_in = h_v
-            shared_feat = self.decoder(decoder_in)
-            preds[name] = self.heads[name](shared_feat)
-
-            probs_list.append(probs)
-            masks_list.append(mask)
-            h_views.append(h_v)
-            shared_feats.append(shared_feat)
+            preds[name] = self.heads[name](H_shared[:, view_idx, :])
 
         output = preds if request is None else preds[request]
         if return_aux:
             aux = {
-                "probs": torch.stack(probs_list, dim=1),  # (B, V, M)
-                "masks": torch.stack(masks_list, dim=1),  # (B, V, M)
-                "H_views": torch.stack(h_views, dim=1),
-                "H_shared": torch.stack(shared_feats, dim=1),
+                "probs": probs,  # (B, V, M)
+                "masks": masks,  # (B, V, M)
+                "H_views": H_views,
+                "H_shared": H_shared,
                 "expert_feats": expert_feats,
             }
             return output, aux
