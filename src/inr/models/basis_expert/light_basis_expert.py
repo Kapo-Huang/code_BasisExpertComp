@@ -8,7 +8,7 @@ from ..sota.siren import SineLayer
 from .components import (
     ExpertEncoder,
     PositionalEncoding,
-    SmallMLPHead,
+    SirenMLP,
     ViewGating,
 )
 
@@ -150,9 +150,17 @@ class LightBasisExpert(nn.Module):
             num_res_blocks=int(decoder_num_res_blocks),
         )
 
+        head_hidden_dim = max(8, self.decoder_feature_dim // 4)
         self.heads = nn.ModuleDict(
             {
-                name: SmallMLPHead(self.decoder_feature_dim, out_dim)
+                name: SirenMLP(
+                    in_dim=self.decoder_feature_dim,
+                    out_dim=out_dim,
+                    hidden_dim=head_hidden_dim,
+                    num_layers=3,
+                    first_omega_0=decoder_first_omega_0,
+                    hidden_omega_0=decoder_hidden_omega_0,
+                )
                 for name, out_dim in self.view_dims.items()
             }
         )
