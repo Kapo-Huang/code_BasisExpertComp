@@ -196,29 +196,36 @@ from ..sota.siren import SineLayer
 
 
 class PositionalEncoding(nn.Module):
-    """Learnable Fourier positional encoding."""
+    """NeRF-style positional encoding."""
+
     def __init__(
         self,
         in_features: int,
-        mapping_size: int,
+        num_frequencies: int = 6,
+        include_input: bool = False,
+        log_sampling: bool = True,
     ):
         super().__init__()
-        if int(mapping_size) <= 0:
-            raise ValueError("mapping_size must be > 0")
+        if log_sampling:
+            freq_bands = 2.0 ** torch.arange(num_frequencies) * math.pi
+        else:
+            freq_bands = torch.linspace(1.0, 2.0 ** (num_frequencies - 1), num_frequencies) * math.pi
+        self.register_buffer("freq_bands", freq_bands)
         self.in_features = in_features
-        self.lin = nn.Linear(in_features, int(mapping_size), bias=True)
-
-    @property
-    def out_dim(self) -> int:
-        return 2 * self.lin.out_features
+        self.include_input = include_input
+        self.out_dim = in_features * (int(include_input) + 2 * num_frequencies)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, in_features)
         return: (B, out_dim)
         """
-        u = self.lin(x)
-        return torch.cat([torch.sin(u), torch.cos(u)], dim=-1)
+        angles = x.unsqueeze(-1) * self.freq_bands
+        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
+        encoded = encoded.reshape(x.shape[0], -1)
+        if self.include_input:
+            return torch.cat([x, encoded], dim=-1)
+        return encoded
 
 class SirenMLP(nn.Module):
     """Simple SIREN MLP used by experts, gating, and decoder heads."""
