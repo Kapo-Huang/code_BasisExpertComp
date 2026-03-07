@@ -1,0 +1,81 @@
+experiment: exp_data_stress_light_basis_expert
+exp_id: light_basis_expert-stress
+experiment_root: experiments
+data:
+  dataset_name: stress
+  split: train
+  target_stats_path: ./data/raw/stress/train/target_stats_multi.npz
+  compute_target_stats: true
+  data_root: ./data
+  x_path: ./data/raw/stress/train/source_cell_XYZT.npy
+  attr_paths:
+    target_E: ./data/raw/stress/train/target_cell_E.npy
+    target_E_IntegrationPoints: ./data/raw/stress/train/target_cell_E_IntegrationPoints.npy
+    target_S: ./data/raw/stress/train/target_cell_S.npy
+    target_S_IntegrationPoints: ./data/raw/stress/train/target_cell_S_IntegrationPoints.npy
+  normalize: true
+model:
+  name: light_basis_expert
+  in_features: 4
+  num_experts: 6
+  base_dim: 8
+  top_k: 3
+  expert_num_frequencies: 6
+  expert_num_layers: 3
+  gate_num_layers: 3
+  decoder_num_layers: 3
+  head_num_layers: 2
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  gate_first_omega_0: 30.0
+  gate_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+  head_first_omega_0: 30.0
+  head_hidden_omega_0: 30.0
+training:
+  epochs: 600
+  batch_size: 8192
+  pred_batch_size: 8192
+  batches_per_epoch_budget: 0
+  lr: 5.0e-05
+  lr_decay_rate: 0.92
+  lr_decay_step: 40
+  log_every: 10
+  log_psnr_every: 10
+  psnr_sample_ratio: 0.1
+  save_every: 300
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0
+  gam_div: 0
+  div_sigma: 1.0
+  gam_orth: 0
+  multiview_ema_loss:
+    enabled: true
+    beta: 0.95
+    eps: 1.0e-08
+    w_min: 0.2
+    w_max: 5.0
+    warmup_steps: 45000
+  pretrain:
+    enabled: true
+    mode: router_classification
+    epochs: 3
+    lr: 5.0e-05
+    batch_size: 8192
+    assignments_method: voxel_clustering
+    cluster_num_time_samples: 6
+    cluster_seed: 42
+    assignments_cache_path: ./data/cache/voxel_assignments_6.npy
+    spatial_blocks:
+      - 4
+      - 4
+      - 4
+    time_block_size: 1
+  timestep_curriculum:
+    enabled: false
+    mode: stride
+    stride_groups: 10
+    epochs_per_group: 8

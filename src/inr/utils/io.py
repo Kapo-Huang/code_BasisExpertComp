@@ -1,8 +1,12 @@
 import os
+import logging
 from pathlib import Path
 from typing import Any, Dict
 
 import torch
+
+
+logger = logging.getLogger(__name__)
 
 
 def ensure_dir(path: str):
@@ -14,6 +18,7 @@ def save_checkpoint(
     dataset,
     path: str,
     suffix: str = "",
+    run_timestamp: str | None = None,
     epoch: int | None = None,
     optimizer: torch.optim.Optimizer | None = None,
 ):
@@ -37,8 +42,10 @@ def save_checkpoint(
         payload["epoch"] = int(epoch)
     if optimizer is not None:
         payload["optimizer_state"] = optimizer.state_dict()
+    if run_timestamp:
+        payload["run_timestamp"] = run_timestamp
     torch.save(payload, save_path)
-    print(f"Saved checkpoint to {save_path}")
+    logger.info("Saved checkpoint to %s", save_path)
 
 
 def load_checkpoint(path: str, model: torch.nn.Module):

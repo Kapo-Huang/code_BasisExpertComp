@@ -1,4 +1,5 @@
 import math
+import logging
 from typing import Optional
 
 import torch
@@ -6,38 +7,35 @@ import torch.nn as nn
 
 from .siren import SineLayer
 
+logger = logging.getLogger(__name__)
+
+
+def _count_parameters(module: nn.Module) -> int:
+    return sum(p.numel() for p in module.parameters())
+
 
 class PositionalEncoding(nn.Module):
-    """NeRF-style positional encoding."""
+    """Learnable Fourier positional encoding."""
     def __init__(
         self,
         in_features: int,
-        num_frequencies: int = 6,
-        include_input: bool = False,
-        log_sampling: bool = True,
+        mapping_size: int,
     ):
         super().__init__()
-        if log_sampling:
-            freq_bands = 2.0 ** torch.arange(num_frequencies) * math.pi
-        else:
-            freq_bands = torch.linspace(1.0, 2.0 ** (num_frequencies - 1), num_frequencies) * math.pi
-        self.register_buffer("freq_bands", freq_bands)
         self.in_features = in_features
-        self.include_input = include_input
-        self.out_dim = in_features * (int(include_input) + 2 * num_frequencies)
-        print(self.out_dim)
+        self.lin = nn.Linear(in_features, mapping_size, bias=True)
+
+    @property
+    def out_dim(self) -> int:
+        return 2 * self.lin.out_features
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """
         x: (B, in_features)
         return: (B, out_dim)
         """
-        angles = x.unsqueeze(-1) * self.freq_bands
-        encoded = torch.cat([torch.sin(angles), torch.cos(angles)], dim=-1)
-        encoded = encoded.reshape(x.shape[0], -1)
-        if self.include_input:
-            return torch.cat([x, encoded], dim=-1)
-        return encoded
+        u = self.lin(x)
+        return torch.cat([torch.sin(u), torch.cos(u)], dim=-1)
 
 
 class SirenMLP(nn.Module):
@@ -90,7 +88,7 @@ class BottleneckResBlock(nn.Module):
     ):
         super().__init__()
         if bottleneck_dim is None:
-            bottleneck_dim = max(1, min(in_dim, out_dim) // 2)
+            bottleneck_dim = max(1, min(in_dim, out_dim) // 4)
         if activation_factory is None:
             activation_factory = lambda _: nn.ReLU()
 
@@ -129,30 +127,28 @@ class SharedSirenEncoder(nn.Module):
         feature_dim: int = 256,
         base_dim: Optional[int] = None,
         num_frequencies: int = 6,
-        include_input: bool = True,
+        include_input: bool = False,
         first_omega_0: float = 30.0,
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
+        if include_input:
+            raise ValueError("Learnable Fourier PE does not support include_input=True.")
+        target_pos_dim = 2 * base_dim
+        pe_mapping_dim = base_dim
+        sine1_dim = 4 * base_dim
+        sine2_dim = 8 * base_dim
+        res_dim = 8 * base_dim
+
         self.pos_enc = PositionalEncoding(
             in_features=in_features,
-            num_frequencies=num_frequencies,
-            include_input=include_input,
+            mapping_size=pe_mapping_dim,
         )
         pos_dim = self.pos_enc.out_dim
-        self.pe_proj = None
-        if base_dim is not None:
-            target_pos_dim = 2 * base_dim
-            if pos_dim != target_pos_dim:
-                self.pe_proj = nn.Linear(pos_dim, target_pos_dim)
-                pos_dim = target_pos_dim
-            sine1_dim = 4 * base_dim
-            sine2_dim = 8 * base_dim
-            res_dim = 8 * base_dim
-        else:
-            sine1_dim = feature_dim
-            sine2_dim = feature_dim
-            res_dim = feature_dim
+        if pos_dim != target_pos_dim:
+            raise RuntimeError(
+                f"Learnable Fourier PE dim mismatch: got {pos_dim}, expected {target_pos_dim}."
+            )
 
         self.sine1 = SineLayer(pos_dim, sine1_dim, omega_0=first_omega_0, is_first=True)
         self.sine2 = SineLayer(sine1_dim, sine2_dim, omega_0=hidden_omega_0)
@@ -161,8 +157,6 @@ class SharedSirenEncoder(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         h = self.pos_enc(x)
-        if self.pe_proj is not None:
-            h = self.pe_proj(h)
         h = self.sine1(h)
         h = self.sine2(h)
         return self.res_block(h)
@@ -205,6 +199,7 @@ class PolicyNetwork(nn.Module):
         self.num_experts = num_experts
         self.hidden_dim = hidden_dim
         self.gate_in_dim = gate_in_dim
+        
 
     def forward(self, x: torch.Tensor, encoder_feat: Optional[torch.Tensor] = None):
         feat = self.feature(x)
@@ -229,14 +224,15 @@ class ExpertDecoder(nn.Module):
         hidden_omega_0: float = 30.0,
     ):
         super().__init__()
-        self.mlp = SirenMLP(
-            in_dim=in_dim,
-            out_dim=out_features,
-            hidden_dim=hidden_dim,
-            num_layers=num_layers,
-            first_omega_0=first_omega_0,
-            hidden_omega_0=hidden_omega_0,
-        )
+        # self.mlp = SirenMLP(
+        #     in_dim=in_dim,
+        #     out_dim=out_features,
+        #     hidden_dim=hidden_dim,
+        #     num_layers=num_layers,
+        #     first_omega_0=first_omega_0,
+        #     hidden_omega_0=hidden_omega_0,
+        # )
+        self.mlp = nn.Linear(in_dim, out_features)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.mlp(x)
@@ -267,6 +263,7 @@ class MoEINR(nn.Module):
         expert_num_layers: int = 3,
         expert_first_omega_0: float = 30.0,
         expert_hidden_omega_0: float = 30.0,
+        top_k: int = 1,
     ):
         super().__init__()
 
@@ -274,7 +271,7 @@ class MoEINR(nn.Module):
             in_features=in_features,
             feature_dim=encoder_feature_dim,
             base_dim=base_dim,
-            num_frequencies=int(base_dim / in_features),
+            num_frequencies=(int(base_dim / in_features) if base_dim is not None else 6),
             include_input=False,
             first_omega_0=encoder_first_omega_0,
             hidden_omega_0=encoder_hidden_omega_0,
@@ -292,6 +289,7 @@ class MoEINR(nn.Module):
 
         fused_dim = encoder_feature_dim
         self.num_experts = num_experts
+        self.top_k = max(1, min(int(top_k), int(num_experts)))
         self.experts = nn.ModuleList(
             [
                 ExpertDecoder(
@@ -307,11 +305,28 @@ class MoEINR(nn.Module):
         )
         self.out_features = out_features
 
+        policy_network_params = _count_parameters(self.policy)
+        experts_params = _count_parameters(self.experts)
+        shared_encoder_params = _count_parameters(self.encoder)
+        logger.info(
+            "MoEINR init params: policy_network=%s experts=%s shared_encoder=%s",
+            f"{policy_network_params:,}",
+            f"{experts_params:,}",
+            f"{shared_encoder_params:,}",
+        )
+
+    def _topk_mask(self, probs: torch.Tensor) -> torch.Tensor:
+        _, indices = torch.topk(probs, k=self.top_k, dim=-1)
+        mask = torch.zeros_like(probs)
+        return mask.scatter_(1, indices, 1.0)
+
     def forward(
         self,
         x: torch.Tensor,
         *,
         hard_routing: bool = False,
+        hard_topk: bool = True,
+        return_aux: bool = False,
         return_all: bool = False,
     ):
         """
@@ -328,11 +343,34 @@ class MoEINR(nn.Module):
             indices = torch.argmax(probs, dim=-1)
             y = preds_all[torch.arange(x.shape[0], device=x.device), indices]
         else:
-            y = torch.sum(preds_all * probs.unsqueeze(-1), dim=1)
+            mask = self._topk_mask(probs)
+            masked_probs = probs * mask
+            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
+            weights = masked_probs if hard_topk else probs
+            y = torch.sum(preds_all * weights.unsqueeze(-1), dim=1)
+
+        if return_aux:
+            aux = {
+                "probs": probs.unsqueeze(1),
+                "masks": self._topk_mask(probs).unsqueeze(1),
+                "expert_feats": preds_all,
+                "encoder_feat": enc_feat,
+                "policy_feat": pol_feat,
+                "logits": logits,
+            }
+            return y, aux
 
         if return_all:
             return y, preds_all, probs, logits
         return y
+
+    def pretrain_forward(self, x: torch.Tensor) -> torch.Tensor:
+        enc_feat = self.encoder(x)
+        _, logits, _ = self.policy(x, enc_feat)
+        return logits
+
+    def pretrain_parameters(self):
+        return list(self.encoder.parameters()) + list(self.policy.parameters())
 
 
 def build_moe_inr_from_config(cfg) -> MoEINR:
@@ -363,4 +401,5 @@ def build_moe_inr_from_config(cfg) -> MoEINR:
         expert_num_layers=int(cfg.get("expert_num_layers", 3)),
         expert_first_omega_0=float(cfg.get("expert_first_omega_0", 30.0)),
         expert_hidden_omega_0=float(cfg.get("expert_hidden_omega_0", 30.0)),
+        top_k=int(cfg.get("top_k", 1)),
     )

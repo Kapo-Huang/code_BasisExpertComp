@@ -1,0 +1,66 @@
+experiment: exp_data_stress_moe_inr_cell_E
+exp_id: moeinr-stress-cell-E
+experiment_root: experiments
+data:
+  dataset_name: stress
+  split: train
+  target_stats_path: ./data/raw/stress/train/target_stats_cell_E.npz
+  compute_target_stats: true
+  data_root: ./data
+  x_path: ./data/raw/stress/train/source_cell_XYZT.npy
+  y_path: ./data/raw/stress/train/target_cell_E.npy
+  normalize: true
+model:
+  name: moe_inr
+  in_features: 4
+  out_features: 24
+  num_experts: 7
+  base_dim: 6
+  encoder_first_omega_0: 30.0
+  encoder_hidden_omega_0: 30.0
+  policy_num_layers: 3
+  policy_first_omega_0: 30.0
+  policy_hidden_omega_0: 30.0
+  expert_num_layers: 2
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+training:
+  epochs: 600
+  batch_size: 16000
+  pred_batch_size: 16000
+  batches_per_epoch_budget: 1500
+  num_workers: 2
+  lr: 5.0e-05
+  lr_decay_rate: 0.92
+  lr_decay_step: 40
+  log_every: 1
+  log_psnr_every: 100
+  psnr_sample_ratio: 0.1
+  save_every: 600
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  lam_eq: 0
+  gam_div: 0
+  div_sigma: 1.0
+  gam_orth: 0
+  pretrain:
+    enabled: true
+    mode: router_classification
+    epochs: 3
+    lr: 5.0e-05
+    batch_size: 16000
+    assignments_method: voxel_clustering
+    cluster_num_time_samples: 7
+    cluster_seed: 42
+    assignments_cache_path: ./data/cache/voxel_assignments.npy
+    spatial_blocks:
+      - 4
+      - 4
+      - 4
+    time_block_size: 1
+  timestep_curriculum:
+    enabled: false
+    mode: stride
+    stride_groups: 5
+    epochs_per_group: 6
