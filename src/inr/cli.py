@@ -41,7 +41,6 @@ from inr.models.sota.stsr_inr import (
     build_stsr_inr_multiview_from_config,
 )
 from inr.training.loops import (
-    MultiAttrEMALossConfig,
     PretrainConfig,
     TimeStepCurriculumConfig,
     TrainingConfig,
@@ -399,16 +398,6 @@ def main():
         stride_groups=int(timestep_curriculum_raw.get("stride_groups", 0)),
         epochs_per_group=int(timestep_curriculum_raw.get("epochs_per_group", 0)),
     )
-    multiview_ema_raw = train_cfg_raw.get("multiview_ema_loss", {}) or {}
-    multiview_ema_cfg = MultiAttrEMALossConfig(
-        enabled=bool(multiview_ema_raw.get("enabled", False)),
-        beta=float(multiview_ema_raw.get("beta", 0.95)),
-        eps=float(multiview_ema_raw.get("eps", 1e-8)),
-        w_min=float(multiview_ema_raw.get("w_min", 0.2)),
-        w_max=float(multiview_ema_raw.get("w_max", 5.0)),
-        warmup_steps=int(multiview_ema_raw.get("warmup_steps", 0)),
-    )
-
     train_cfg = TrainingConfig(
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
@@ -443,7 +432,6 @@ def main():
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
         multiview_recon_reduction=str(train_cfg_raw.get("multiview_recon_reduction", "attr_sum")),
-        multiview_ema_loss=multiview_ema_cfg,
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))

@@ -20,7 +20,6 @@ from inr.datasets.volumetric import (
     make_singletarget_collate,
 )
 from inr.training.losses import (
-    MultiAttrEMALoss,
     diversity_loss,
     load_balance_loss,
     orth_loss,
@@ -96,16 +95,6 @@ class TimeStepCurriculumConfig:
 
 
 @dataclass
-class MultiAttrEMALossConfig:
-    enabled: bool = False
-    beta: float = 0.95
-    eps: float = 1e-8
-    w_min: float = 0.2
-    w_max: float = 5.0
-    warmup_steps: int = 0
-
-
-@dataclass
 class TrainingConfig:
     epochs: int = 100
     batch_size: int = 8000
@@ -140,7 +129,6 @@ class TrainingConfig:
     freeze_router_at: float = 0.8
     hard_topk_warmup_epochs: int = 0
     multiview_recon_reduction: str = "attr_sum"
-    multiview_ema_loss: MultiAttrEMALossConfig = field(default_factory=MultiAttrEMALossConfig)
 
 
 def _unpack_batch(batch):
@@ -162,8 +150,6 @@ def _compute_multiview_loss(
     return_aux: bool = False,
     return_breakdown: bool = False,
     hard_topk: bool = True,
-    ema_recon_loss: Optional[MultiAttrEMALoss] = None,
-    update_ema_loss: bool = True,
 ):
     try:
         preds, aux = model(xb, return_aux=True, hard_topk=hard_topk)
@@ -175,64 +161,12 @@ def _compute_multiview_loss(
             aux = {}
     recon_mode = str(getattr(cfg, "multiview_recon_reduction", "attr_sum") or "attr_sum").strip().lower()
     weight_mode = "static"
-    ema_state = None
-
-    if ema_recon_loss is not None:
-        _, losses_t, dynamic_w, ema_details = ema_recon_loss(
-            preds,
-            yb,
-            return_details=True,
-            return_tensors=True,
-            update_ema=update_ema_loss,
-        )
-        attr_names = list(ema_recon_loss.attr_names)
-        effective_w = dynamic_w
-        if cfg.view_loss_weights:
-            base_w = torch.tensor(
-                [float(cfg.view_loss_weights.get(name, 1.0)) for name in attr_names],
-                device=losses_t.device,
-                dtype=losses_t.dtype,
-            )
-            effective_w = effective_w * base_w
-            effective_w = effective_w / (effective_w.mean() + 1e-12)
-
-        dims = torch.tensor(
-            [float(preds[name][0].numel()) for name in attr_names],
-            device=losses_t.device,
-            dtype=losses_t.dtype,
-        )
-
-        loss_recon_attr_sum = torch.sum(effective_w * losses_t)
-        weighted_dim_numer = torch.sum(effective_w * dims * losses_t)
-        weighted_dim_denom = torch.sum(effective_w * dims)
-        loss_recon_dim_norm = weighted_dim_numer / (weighted_dim_denom + 1e-12)
-
-        recon_details = {}
-        for i, name in enumerate(attr_names):
-            loss_per_dim = float(losses_t[i].detach().item())
-            out_dim = float(dims[i].detach().item())
-            weight = float(effective_w[i].detach().item())
-            recon_details[name] = {
-                "dim": out_dim,
-                "weight": weight,
-                "loss_per_dim": loss_per_dim,
-                "loss_sum_dims": loss_per_dim * out_dim,
-            }
-
-        weight_mode = "ema"
-        ema_state = {
-            "step": int(ema_details["step"]),
-            "warmup_steps": int(ema_details["warmup_steps"]),
-            "dynamic_weights": dict(ema_details["weights"]),
-            "effective_weights": {name: float(effective_w[i].detach().item()) for i, name in enumerate(attr_names)},
-        }
-    else:
-        loss_recon_attr_sum, loss_recon_dim_norm, recon_details = reconstruction_loss_with_breakdown(
-            preds,
-            yb,
-            weights=cfg.view_loss_weights or None,
-            loss_type=cfg.loss_type,
-        )
+    loss_recon_attr_sum, loss_recon_dim_norm, recon_details = reconstruction_loss_with_breakdown(
+        preds,
+        yb,
+        weights=cfg.view_loss_weights or None,
+        loss_type=cfg.loss_type,
+    )
 
     if recon_mode in {"dim_mean", "dim_normalized", "fair"}:
         loss_recon = loss_recon_dim_norm
@@ -265,7 +199,6 @@ def _compute_multiview_loss(
             "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
             "per_view": recon_details,
             "weight_mode": weight_mode,
-            "ema_state": ema_state,
         }
         return loss, loss_recon, loss_eq, loss_div, loss_orth, aux, recon_breakdown
     if return_aux:
@@ -278,7 +211,6 @@ def _compute_multiview_loss(
             "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
             "per_view": recon_details,
             "weight_mode": weight_mode,
-            "ema_state": ema_state,
         }
         return loss, loss_recon, loss_eq, loss_div, loss_orth, recon_breakdown
     return loss, loss_recon, loss_eq, loss_div, loss_orth
@@ -832,33 +764,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         criterion = torch.nn.L1Loss()
     else:
         criterion = torch.nn.MSELoss()
-    multiview_ema_recon_loss: Optional[MultiAttrEMALoss] = None
-    if is_multiview and cfg.multiview_ema_loss.enabled:
-        if not hasattr(dataset, "view_specs") or not callable(getattr(dataset, "view_specs")):
-            raise ValueError("multiview_ema_loss requires dataset.view_specs() for attribute names.")
-        attr_names = list(dataset.view_specs().keys())
-        if not attr_names:
-            raise ValueError("multiview_ema_loss requires at least one attribute in dataset.view_specs().")
-        multiview_ema_recon_loss = MultiAttrEMALoss(
-            attr_names=attr_names,
-            beta=cfg.multiview_ema_loss.beta,
-            eps=cfg.multiview_ema_loss.eps,
-            w_min=cfg.multiview_ema_loss.w_min,
-            w_max=cfg.multiview_ema_loss.w_max,
-            warmup_steps=cfg.multiview_ema_loss.warmup_steps,
-            loss_type=cfg.loss_type,
-        ).to(device)
-        logger.info(
-            "Enable multiview EMA loss balancing: attrs=%s beta=%.4f warmup_steps=%d w_min=%.3f w_max=%.3f",
-            attr_names,
-            cfg.multiview_ema_loss.beta,
-            cfg.multiview_ema_loss.warmup_steps,
-            cfg.multiview_ema_loss.w_min,
-            cfg.multiview_ema_loss.w_max,
-        )
-        if cfg.view_loss_weights:
-            logger.info("view_loss_weights detected: static weights are multiplied with EMA weights and renormalized.")
-
     start_time = time.time()
     best_val = float("inf")
     best_state = None
@@ -926,7 +831,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         multiview_per_view_acc: Dict[str, Dict[str, float]] = {}
         multiview_selected_mode = "attr_sum"
         multiview_weight_mode = "static"
-        multiview_last_ema_state = None
         data_time = 0.0
         compute_time = 0.0
         iterator = train_loader
@@ -948,15 +852,12 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     return_aux=True,
                     return_breakdown=True,
                     hard_topk=hard_topk,
-                    ema_recon_loss=multiview_ema_recon_loss,
-                    update_ema_loss=True,
                 )
                 multiview_recon_attr_sum_acc += float(recon_breakdown["weighted_attr_sum_loss"])
                 multiview_recon_dim_norm_acc += float(recon_breakdown["weighted_dim_normalized_loss"])
                 multiview_recon_selected_acc += float(recon_breakdown["selected_loss"])
                 multiview_selected_mode = str(recon_breakdown["selected_mode"])
                 multiview_weight_mode = str(recon_breakdown.get("weight_mode", "static"))
-                multiview_last_ema_state = recon_breakdown.get("ema_state")
                 for name, stats in recon_breakdown["per_view"].items():
                     if name not in multiview_per_view_acc:
                         multiview_per_view_acc[name] = {
@@ -1019,7 +920,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 len(val_ds),
                 cfg,
                 hard_topk=hard_topk,
-                ema_recon_loss=multiview_ema_recon_loss,
             )
             if val_loss < best_val:
                 best_val = val_loss
@@ -1088,13 +988,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                             stats["loss_sum_dims"] / float(steps_seen),
                             metric_tag,
                             stats["loss_per_dim"] / float(steps_seen),
-                        )
-                    if multiview_weight_mode == "ema" and multiview_last_ema_state:
-                        logger.info(
-                            "EMA balance state: step=%d warmup_steps=%d effective_weights=%s",
-                            int(multiview_last_ema_state.get("step", 0)),
-                            int(multiview_last_ema_state.get("warmup_steps", 0)),
-                            multiview_last_ema_state.get("effective_weights", {}),
                         )
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
@@ -1216,7 +1109,6 @@ def evaluate(
     n_samples: int,
     cfg: TrainingConfig,
     hard_topk: bool = True,
-    ema_recon_loss: Optional[MultiAttrEMALoss] = None,
 ):
     model.eval()
     loss_sum = 0.0
@@ -1235,8 +1127,6 @@ def evaluate(
                     yb,
                     cfg,
                     hard_topk=hard_topk,
-                    ema_recon_loss=ema_recon_loss,
-                    update_ema_loss=False,
                 )
             else:
                 yb = yb.to(device)
