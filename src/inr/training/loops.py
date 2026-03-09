@@ -22,6 +22,7 @@ from inr.datasets.volumetric import (
 from inr.training.losses import (
     reconstruction_loss,
 )
+from inr.training.gradient_balancer import _apply_multitask_gradient
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -82,6 +83,15 @@ class TimeStepCurriculumConfig:
 
 
 @dataclass
+class GradientBalancerConfig:
+    enabled: bool = False
+    method: str = "pcgrad"
+    cagrad_c: float = 0.4
+    solver_max_iter: int = 50
+    solver_lr: float = 0.25
+
+
+@dataclass
 class TrainingConfig:
     epochs: int = 100
     batch_size: int = 8000
@@ -110,6 +120,7 @@ class TrainingConfig:
     lr_decay_step: int = 0
     freeze_router_at: float = 0.8
     hard_topk_warmup_epochs: int = 0
+    gradient_balancer: GradientBalancerConfig = field(default_factory=GradientBalancerConfig)
 
 
 def _unpack_batch(batch):
@@ -130,6 +141,7 @@ def _compute_multiview_loss(
     cfg: TrainingConfig,
     return_aux: bool = False,
     return_breakdown: bool = False,
+    return_task_losses: bool = False,
     hard_topk: bool = True,
 ):
     try:
@@ -140,36 +152,34 @@ def _compute_multiview_loss(
         except TypeError:
             preds = model(xb)
             aux = {}
-    loss_recon = reconstruction_loss(
+    weighted_attr_sum_loss, weighted_dim_normalized_loss, recon_breakdown, task_losses = reconstruction_loss(
         preds,
         yb,
         weights=cfg.view_loss_weights or None,
         loss_type=cfg.loss_type,
     )
+    loss_recon = weighted_attr_sum_loss
     loss = loss_recon
 
+    recon_breakdown["selected_mode"] = "attr_sum"
+    recon_breakdown["selected_loss"] = float(weighted_attr_sum_loss.detach().item())
+    recon_breakdown["weighted_attr_sum_loss"] = float(weighted_attr_sum_loss.detach().item())
+    recon_breakdown["weighted_dim_normalized_loss"] = float(weighted_dim_normalized_loss.detach().item())
+
+    if return_aux and return_breakdown and return_task_losses:
+        return loss, loss_recon, aux, recon_breakdown, task_losses
     if return_aux and return_breakdown:
-        recon_breakdown = {
-            "selected_mode": "attr_sum",
-            "selected_loss": float(loss_recon.detach().item()),
-            "weighted_attr_sum_loss": float(loss_recon.detach().item()),
-            "weighted_dim_normalized_loss": float(loss_recon.detach().item()),
-            "per_view": {},
-            "weight_mode": "static",
-        }
         return loss, loss_recon, aux, recon_breakdown
+    if return_aux and return_task_losses:
+        return loss, loss_recon, aux, task_losses
     if return_aux:
         return loss, loss_recon, aux
+    if return_breakdown and return_task_losses:
+        return loss, loss_recon, recon_breakdown, task_losses
     if return_breakdown:
-        recon_breakdown = {
-            "selected_mode": "attr_sum",
-            "selected_loss": float(loss_recon.detach().item()),
-            "weighted_attr_sum_loss": float(loss_recon.detach().item()),
-            "weighted_dim_normalized_loss": float(loss_recon.detach().item()),
-            "per_view": {},
-            "weight_mode": "static",
-        }
         return loss, loss_recon, recon_breakdown
+    if return_task_losses:
+        return loss, loss_recon, task_losses
     return loss, loss_recon
 
 
@@ -646,6 +656,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         multiview_per_view_acc: Dict[str, Dict[str, float]] = {}
         multiview_selected_mode = "attr_sum"
         multiview_weight_mode = "static"
+        last_grad_balance_state = None
         data_time = 0.0
         compute_time = 0.0
         iterator = train_loader
@@ -657,15 +668,18 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             step_start = time.perf_counter()
             xb, yb = _unpack_batch(batch)
             xb = xb.to(device, non_blocking=True)
-            if _is_multiview_target(yb):
+            task_losses = None
+            is_multiview_batch = _is_multiview_target(yb)
+            if is_multiview_batch:
                 yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
-                loss, loss_recon, aux, recon_breakdown = _compute_multiview_loss(
+                loss, loss_recon, aux, recon_breakdown, task_losses = _compute_multiview_loss(
                     model,
                     xb,
                     yb,
                     cfg,
                     return_aux=True,
                     return_breakdown=True,
+                    return_task_losses=True,
                     hard_topk=hard_topk,
                 )
                 multiview_recon_attr_sum_acc += float(recon_breakdown["weighted_attr_sum_loss"])
@@ -703,7 +717,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     reg = model.indicator_regularization()
                     loss = loss + (reg if torch.is_tensor(reg) else torch.tensor(reg, device=loss.device, dtype=loss.dtype))
             optim.zero_grad()
-            loss.backward()
+            if is_multiview_batch:
+                if cfg.gradient_balancer.enabled and task_losses is not None and len(task_losses) > 1:
+                    last_grad_balance_state = _apply_multitask_gradient(model, task_losses, cfg)
+                else:
+                    loss.backward()
+            else:
+                loss.backward()
             optim.step()
             epoch_loss += loss.item()
             steps_seen += 1
@@ -777,7 +797,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         elapsed,
                     )
                 if steps_seen > 0:
-                    metric_tag = "mse" if str(cfg.loss_type).strip().lower() == "mse" else "l1"
                     logger.info(
                         "Recon loss (%s): attr_sum=%.6e dim_normalized=%.6e selected[%s]=%.6e",
                         multiview_weight_mode,
@@ -786,6 +805,18 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         multiview_selected_mode,
                         multiview_recon_selected_acc / float(steps_seen),
                     )
+                if last_grad_balance_state is not None:
+                    method = str(last_grad_balance_state.get("method", "")).lower()
+                    if method in {"mgda", "cagrad"}:
+                        task_names = list(last_grad_balance_state.get("task_names") or [])
+                        task_weights = list(last_grad_balance_state.get("task_weights") or [])
+                        weight_text = " ".join(
+                            f"{name}={float(weight):.6f}"
+                            for name, weight in zip(task_names, task_weights)
+                        )
+                        logger.info("Gradient balancer [%s]: %s", method, weight_text)
+                    elif method == "pcgrad":
+                        logger.info("Gradient balancer [pcgrad]: applied")
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(
