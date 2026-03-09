@@ -80,30 +80,55 @@ def _merge_grads_pcgrad(G: torch.Tensor) -> torch.Tensor:
     if G.ndim != 2:
         raise ValueError("G must have shape (T, P)")
     T = int(G.shape[0])
+    device = G.device
+
     projected = G.clone()
+
     for i in range(T):
-        gi = projected[i]
-        for j in range(T):
+        gi = G[i].clone()
+        order = torch.randperm(T, device=device)
+        for j in order.tolist():
             if i == j:
                 continue
-            gj = projected[j]
+            gj = G[j]
             dot_ij = torch.dot(gi, gj)
-            if float(dot_ij.item()) < 0.0:
-                denom = torch.dot(gj, gj) + 1e-12
-                gi = gi - (dot_ij / denom) * gj
+            if dot_ij < 0:
+                gi = gi - (dot_ij / (torch.dot(gj, gj) + 1e-12)) * gj
         projected[i] = gi
-    return torch.mean(projected, dim=0)
 
+    return projected.mean(dim=0)
+
+
+# def _solve_mgda_weights(G: torch.Tensor, max_iter: int, lr: float) -> torch.Tensor:
+#     if G.ndim != 2:
+#         raise ValueError("G must have shape (T, P)")
+#     T = int(G.shape[0])
+#     alpha = torch.full((T,), 1.0 / float(T), device=G.device, dtype=G.dtype)
+#     A = G @ G.transpose(0, 1)
+#     for _ in range(int(max_iter)):
+#         grad = 2.0 * (A @ alpha)
+#         alpha = _project_to_simplex(alpha - float(lr) * grad)
+#     return alpha
 
 def _solve_mgda_weights(G: torch.Tensor, max_iter: int, lr: float) -> torch.Tensor:
     if G.ndim != 2:
         raise ValueError("G must have shape (T, P)")
     T = int(G.shape[0])
+    if T == 1:
+        return torch.ones(1, device=G.device, dtype=G.dtype)
+
     alpha = torch.full((T,), 1.0 / float(T), device=G.device, dtype=G.dtype)
     A = G @ G.transpose(0, 1)
+
+    # Use a safe step size based on spectral norm
+    eigvals = torch.linalg.eigvalsh(A)
+    L = 2.0 * torch.clamp(eigvals.max(), min=1e-12)
+    step = min(float(lr), float(1.0 / L))
+
     for _ in range(int(max_iter)):
         grad = 2.0 * (A @ alpha)
-        alpha = _project_to_simplex(alpha - float(lr) * grad)
+        alpha = _project_to_simplex(alpha - step * grad)
+
     return alpha
 
 
@@ -113,17 +138,77 @@ def _merge_grads_mgda(G: torch.Tensor, max_iter: int, lr: float) -> Tuple[torch.
     return merged_grad, alpha
 
 
-def _solve_cagrad_weights(G: torch.Tensor, c: float, max_iter: int, lr: float) -> torch.Tensor:
+# def _solve_cagrad_weights(G: torch.Tensor, c: float, max_iter: int, lr: float) -> torch.Tensor:
+#     if G.ndim != 2:
+#         raise ValueError("G must have shape (T, P)")
+#     T = int(G.shape[0])
+#     w = torch.full((T,), 1.0 / float(T), device=G.device, dtype=G.dtype)
+#     g0 = torch.mean(G, dim=0)
+#     for _ in range(int(max_iter)):
+#         gw = w @ G
+#         gw_norm = torch.norm(gw) + 1e-12
+#         grad = (G @ g0) + float(c) * ((G @ gw) / gw_norm)
+#         w = _project_to_simplex(w - float(lr) * grad)
+#     return w
+
+
+# def _merge_grads_cagrad(
+#     G: torch.Tensor,
+#     c: float,
+#     max_iter: int,
+#     lr: float,
+# ) -> Tuple[torch.Tensor, torch.Tensor]:
+#     w = _solve_cagrad_weights(G, c=c, max_iter=max_iter, lr=lr)
+#     g0 = torch.mean(G, dim=0)
+#     gw = w @ G
+#     merged_grad = g0 + float(c) * gw / (torch.norm(gw) + 1e-12)
+#     return merged_grad, w
+
+def _solve_cagrad_weights(
+    G: torch.Tensor,
+    c: float,
+    max_iter: int,
+    lr: float,
+) -> torch.Tensor:
     if G.ndim != 2:
         raise ValueError("G must have shape (T, P)")
+
     T = int(G.shape[0])
+    if T == 0:
+        raise ValueError("G must contain at least one task gradient")
+    if T == 1:
+        return torch.ones(1, device=G.device, dtype=G.dtype)
+
+    # Average gradient
+    g0 = torch.mean(G, dim=0)                  # (P,)
+
+    # Gram matrix and linear term
+    A = G @ G.transpose(0, 1)                  # (T, T)
+    b = G @ g0                                 # (T,)
+
+    # Initialize on simplex
     w = torch.full((T,), 1.0 / float(T), device=G.device, dtype=G.dtype)
-    g0 = torch.mean(G, dim=0)
+
+    # Use a safer step size based on spectral norm of A
+    eigvals = torch.linalg.eigvalsh(A)
+    L = torch.clamp(eigvals.max(), min=1e-12)
+    step = min(float(lr), float(1.0 / L))
+
+    eps = 1e-12
+
     for _ in range(int(max_iter)):
-        gw = w @ G
-        gw_norm = torch.norm(gw) + 1e-12
-        grad = (G @ g0) + float(c) * ((G @ gw) / gw_norm)
-        w = _project_to_simplex(w - float(lr) * grad)
+        quad = torch.clamp(w @ A @ w, min=eps)           # scalar
+        sqrt_quad = torch.sqrt(quad)                     # ||gw||
+
+        # Objective:
+        #   f(w) = b^T w + c * sqrt(w^T A w + eps)
+        #
+        # Gradient:
+        #   grad = b + c * (A w) / sqrt(w^T A w + eps)
+        grad = b + float(c) * (A @ w) / sqrt_quad
+
+        w = _project_to_simplex(w - step * grad)
+
     return w
 
 
@@ -133,10 +218,17 @@ def _merge_grads_cagrad(
     max_iter: int,
     lr: float,
 ) -> Tuple[torch.Tensor, torch.Tensor]:
+    if G.ndim != 2:
+        raise ValueError("G must have shape (T, P)")
+
+    g0 = torch.mean(G, dim=0)  # (P,)
     w = _solve_cagrad_weights(G, c=c, max_iter=max_iter, lr=lr)
-    g0 = torch.mean(G, dim=0)
-    gw = w @ G
-    merged_grad = g0 + float(c) * gw / (torch.norm(gw) + 1e-12)
+    gw = w @ G                 # (P,)
+
+    gw_norm = torch.norm(gw).clamp_min(1e-12)
+
+    # Practical CAGrad-style merged gradient
+    merged_grad = g0 + float(c) * gw / gw_norm
     return merged_grad, w
 
 

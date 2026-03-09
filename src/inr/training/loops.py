@@ -21,6 +21,7 @@ from inr.datasets.volumetric import (
 )
 from inr.training.losses import (
     reconstruction_loss,
+    reconstruction_loss_with_breakdown,
 )
 from inr.training.gradient_balancer import _apply_multitask_gradient
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
@@ -152,7 +153,7 @@ def _compute_multiview_loss(
         except TypeError:
             preds = model(xb)
             aux = {}
-    weighted_attr_sum_loss, weighted_dim_normalized_loss, recon_breakdown, task_losses = reconstruction_loss(
+    weighted_attr_sum_loss, weighted_dim_normalized_loss, recon_breakdown, task_losses = reconstruction_loss_with_breakdown(
         preds,
         yb,
         weights=cfg.view_loss_weights or None,

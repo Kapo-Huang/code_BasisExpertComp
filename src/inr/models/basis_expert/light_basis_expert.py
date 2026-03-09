@@ -189,7 +189,7 @@ def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) 
     base_dim = int(base_dim)
     expert_feature_dim = 8 * base_dim
     view_embed_dim = base_dim
-    expert_hidden_dim = 8 * base_dim
+    expert_hidden_dim = 4 * base_dim
     gate_hidden_dim = 8 * base_dim
     decoder_hidden_dim = 8 * base_dim
     decoder_feature_dim = (
