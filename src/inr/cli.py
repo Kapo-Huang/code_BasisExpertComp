@@ -375,16 +375,6 @@ def main():
         assignments_method=str(pretrain_raw.get("assignments_method", "voxel_clustering")),
         spatial_blocks=tuple(pretrain_raw.get("spatial_blocks", [])) or None,
         time_block_size=int(pretrain_raw.get("time_block_size", 0)),
-        mode=str(pretrain_raw.get("mode", "router_classification")),
-        stage1_epochs=int(pretrain_raw.get("stage1_epochs", 0)),
-        stage2_epochs=int(pretrain_raw.get("stage2_epochs", 0)),
-        stage1_gam_div=float(pretrain_raw.get("stage1_gam_div", 1e-4)),
-        stage1_gam_orth=float(pretrain_raw.get("stage1_gam_orth", 1e-4)),
-        stage1_orth_eps=float(pretrain_raw.get("stage1_orth_eps", 1e-6)),
-        stage1_div_sigma=float(pretrain_raw.get("stage1_div_sigma", 1.0)),
-        stage2_entropy_weight=float(pretrain_raw.get("stage2_entropy_weight", 0.0)),
-        stage2_lam_eq=float(pretrain_raw.get("stage2_lam_eq", 0.0)),
-        stage2_temperature=float(pretrain_raw.get("stage2_temperature", 1.0)),
     )
 
     timestep_curriculum_raw = train_cfg_raw.get("timestep_curriculum", {}) or {}
@@ -419,11 +409,6 @@ def main():
         exp_id=exp_layout["exp_id"],
         run_timestamp=run_timestamp,
         loss_type=str(train_cfg_raw.get("loss_type", "mse")),
-        lam_eq=float(train_cfg_raw.get("lam_eq", 0.0)),
-        gam_div=float(train_cfg_raw.get("gam_div", 0.0)),
-        gam_orth=float(train_cfg_raw.get("gam_orth", 0.0)),
-        orth_eps=float(train_cfg_raw.get("orth_eps", 1e-6)),
-        div_sigma=float(train_cfg_raw.get("div_sigma", 1.0)),
         view_loss_weights=train_cfg_raw.get("view_loss_weights"),
         pretrain=pretrain_cfg,
         timestep_curriculum=timestep_curriculum_cfg,
@@ -431,7 +416,6 @@ def main():
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
-        multiview_recon_reduction=str(train_cfg_raw.get("multiview_recon_reduction", "attr_sum")),
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))

@@ -20,10 +20,7 @@ from inr.datasets.volumetric import (
     make_singletarget_collate,
 )
 from inr.training.losses import (
-    diversity_loss,
-    load_balance_loss,
-    orth_loss,
-    reconstruction_loss_with_breakdown,
+    reconstruction_loss,
 )
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
@@ -70,16 +67,6 @@ class PretrainConfig:
     assignments_method: str = "voxel_clustering"
     spatial_blocks: Optional[Tuple[int, int, int]] = None
     time_block_size: int = 0
-    mode: str = "router_classification"
-    stage1_epochs: int = 0
-    stage2_epochs: int = 0
-    stage1_gam_div: float = 1e-4
-    stage1_gam_orth: float = 1e-4
-    stage1_orth_eps: float = 1e-6
-    stage1_div_sigma: float = 1.0
-    stage2_entropy_weight: float = 0.0
-    stage2_lam_eq: float = 0.0
-    stage2_temperature: float = 1.0
 
 
 @dataclass
@@ -116,11 +103,6 @@ class TrainingConfig:
     exp_id: str = ""
     run_timestamp: str = ""
     loss_type: str = "mse"
-    lam_eq: float = 0.0
-    gam_div: float = 0.0
-    gam_orth: float = 0.0
-    orth_eps: float = 1e-6
-    div_sigma: float = 1.0
     view_loss_weights: Optional[dict] = field(default_factory=dict)
     pretrain: PretrainConfig = field(default_factory=PretrainConfig)
     timestep_curriculum: TimeStepCurriculumConfig = field(default_factory=TimeStepCurriculumConfig)
@@ -128,7 +110,6 @@ class TrainingConfig:
     lr_decay_step: int = 0
     freeze_router_at: float = 0.8
     hard_topk_warmup_epochs: int = 0
-    multiview_recon_reduction: str = "attr_sum"
 
 
 def _unpack_batch(batch):
@@ -159,61 +140,37 @@ def _compute_multiview_loss(
         except TypeError:
             preds = model(xb)
             aux = {}
-    recon_mode = str(getattr(cfg, "multiview_recon_reduction", "attr_sum") or "attr_sum").strip().lower()
-    weight_mode = "static"
-    loss_recon_attr_sum, loss_recon_dim_norm, recon_details = reconstruction_loss_with_breakdown(
+    loss_recon = reconstruction_loss(
         preds,
         yb,
         weights=cfg.view_loss_weights or None,
         loss_type=cfg.loss_type,
     )
-
-    if recon_mode in {"dim_mean", "dim_normalized", "fair"}:
-        loss_recon = loss_recon_dim_norm
-    else:
-        recon_mode = "attr_sum"
-        loss_recon = loss_recon_attr_sum
-
     loss = loss_recon
-
-    loss_eq = torch.zeros((), device=xb.device)
-    if cfg.lam_eq > 0.0 and "probs" in aux and "masks" in aux:
-        loss_eq = load_balance_loss(aux["probs"], aux["masks"])
-        loss = loss + cfg.lam_eq * loss_eq
-
-    loss_div = torch.zeros((), device=xb.device)
-    if cfg.gam_div > 0.0 and "expert_feats" in aux:
-        loss_div = diversity_loss(aux["expert_feats"], sigma=cfg.div_sigma)
-        loss = loss + cfg.gam_div * loss_div
-
-    loss_orth = torch.zeros((), device=xb.device)
-    if cfg.gam_orth > 0.0 and "expert_feats" in aux:
-        loss_orth = orth_loss(aux["expert_feats"], eps=cfg.orth_eps)
-        loss = loss + cfg.gam_orth * loss_orth
 
     if return_aux and return_breakdown:
         recon_breakdown = {
-            "selected_mode": recon_mode,
+            "selected_mode": "attr_sum",
             "selected_loss": float(loss_recon.detach().item()),
-            "weighted_attr_sum_loss": float(loss_recon_attr_sum.detach().item()),
-            "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
-            "per_view": recon_details,
-            "weight_mode": weight_mode,
+            "weighted_attr_sum_loss": float(loss_recon.detach().item()),
+            "weighted_dim_normalized_loss": float(loss_recon.detach().item()),
+            "per_view": {},
+            "weight_mode": "static",
         }
-        return loss, loss_recon, loss_eq, loss_div, loss_orth, aux, recon_breakdown
+        return loss, loss_recon, aux, recon_breakdown
     if return_aux:
-        return loss, loss_recon, loss_eq, loss_div, loss_orth, aux
+        return loss, loss_recon, aux
     if return_breakdown:
         recon_breakdown = {
-            "selected_mode": recon_mode,
+            "selected_mode": "attr_sum",
             "selected_loss": float(loss_recon.detach().item()),
-            "weighted_attr_sum_loss": float(loss_recon_attr_sum.detach().item()),
-            "weighted_dim_normalized_loss": float(loss_recon_dim_norm.detach().item()),
-            "per_view": recon_details,
-            "weight_mode": weight_mode,
+            "weighted_attr_sum_loss": float(loss_recon.detach().item()),
+            "weighted_dim_normalized_loss": float(loss_recon.detach().item()),
+            "per_view": {},
+            "weight_mode": "static",
         }
-        return loss, loss_recon, loss_eq, loss_div, loss_orth, recon_breakdown
-    return loss, loss_recon, loss_eq, loss_div, loss_orth
+        return loss, loss_recon, recon_breakdown
+    return loss, loss_recon
 
 
 def _resolve_collate(ds: Dataset):
@@ -448,46 +405,10 @@ def _build_pretrain_loader(dataset: Dataset, cfg: TrainingConfig, assignments: n
     )
 
 
-def _build_pretrain_coords_loader(dataset: Dataset, cfg: TrainingConfig) -> DataLoader:
-    base_ds = _resolve_base_dataset(dataset)
-    if isinstance(base_ds, MultiTargetVolumetricDataset):
-        collate_fn = make_multitarget_collate(base_ds, read_targets=False)
-    elif isinstance(base_ds, VolumetricDataset):
-        collate_fn = make_singletarget_collate(base_ds, read_targets=False)
-    else:
-        raise TypeError(f"Unsupported dataset type: {type(base_ds)}")
-
-    sampler = None
-    shuffle = True
-    if cfg.batches_per_epoch_budget > 0:
-        if not hasattr(base_ds, "volume_shape") or base_ds.volume_shape is None:
-            raise ValueError("Time-step sampling requires dataset.volume_shape with T dimension.")
-        total_samples_budget = int(cfg.batches_per_epoch_budget) * int(cfg.pretrain.batch_size)
-        sampler = TimeStepRandomSampler(dataset, base_ds.volume_shape, total_samples_budget)
-        shuffle = False
-
-    pretrain_kwargs = {
-        "pin_memory": True,
-        "num_workers": cfg.num_workers,
-        "persistent_workers": cfg.num_workers > 0,
-        "collate_fn": collate_fn,
-    }
-    if cfg.num_workers > 0:
-        pretrain_kwargs["prefetch_factor"] = 4
-    return DataLoader(
-        dataset,
-        batch_size=cfg.pretrain.batch_size,
-        shuffle=shuffle,
-        sampler=sampler,
-        **pretrain_kwargs,
-    )
-
-
 def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig, device: torch.device):
     if not cfg.pretrain.enabled:
         return
-    mode = str(cfg.pretrain.mode).strip().lower()
-    if mode != "basis_two_stage" and cfg.pretrain.epochs <= 0:
+    if cfg.pretrain.epochs <= 0:
         return
     if cfg.pretrain.batch_size <= 0:
         raise ValueError("pretrain.batch_size must be positive")
@@ -501,112 +422,6 @@ def _maybe_run_pretrain(model: torch.nn.Module, dataset: Dataset, cfg: TrainingC
         raise ValueError("Pretrain requires model.num_experts")
 
     base_ds = _resolve_base_dataset(dataset)
-    if mode == "basis_two_stage":
-        stage1_epochs = int(cfg.pretrain.stage1_epochs)
-        stage2_epochs = int(cfg.pretrain.stage2_epochs)
-        if stage1_epochs <= 0 and stage2_epochs <= 0:
-            raise ValueError("basis_two_stage requires stage1_epochs and/or stage2_epochs > 0")
-
-        coord_loader = _build_pretrain_coords_loader(dataset, cfg)
-
-        if stage1_epochs > 0:
-            if not hasattr(model, "pretrain_stage1_parameters") or not callable(getattr(model, "pretrain_stage1_parameters")):
-                raise ValueError("basis_two_stage requires model.pretrain_stage1_parameters()")
-            if not hasattr(model, "pretrain_stage1_expert_feats") or not callable(getattr(model, "pretrain_stage1_expert_feats")):
-                raise ValueError("basis_two_stage requires model.pretrain_stage1_expert_feats(x)")
-            opt = torch.optim.Adam(
-                list(model.pretrain_stage1_parameters()),
-                lr=cfg.pretrain.lr,
-                betas=(0.9, 0.999),
-            )
-            start_time = time.time()
-            for epoch in range(1, stage1_epochs + 1):
-                model.train()
-                epoch_loss = 0.0
-                steps = 0
-                iterator = coord_loader
-                if tqdm is not None:
-                    iterator = tqdm(coord_loader, desc=f"pretrain_s1 {epoch}/{stage1_epochs}", leave=False)
-                for xb in iterator:
-                    xb = xb.to(device)
-                    expert_feats = model.pretrain_stage1_expert_feats(xb)
-                    loss_div = diversity_loss(expert_feats, sigma=cfg.pretrain.stage1_div_sigma)
-                    loss_orth = orth_loss(expert_feats, eps=cfg.pretrain.stage1_orth_eps)
-                    loss = cfg.pretrain.stage1_gam_div * loss_div + cfg.pretrain.stage1_gam_orth * loss_orth
-                    opt.zero_grad()
-                    loss.backward()
-                    opt.step()
-                    epoch_loss += loss.item()
-                    steps += 1
-                epoch_loss /= max(steps, 1)
-                elapsed = time.time() - start_time
-                logger.info(
-                    "Pretrain stage1 %s/%s loss=%.6e div=%.3e orth=%.3e time=%.1fs",
-                    epoch,
-                    stage1_epochs,
-                    epoch_loss,
-                    loss_div.item(),
-                    loss_orth.item(),
-                    elapsed,
-                )
-
-        if stage2_epochs > 0:
-            if not hasattr(model, "pretrain_stage2_parameters") or not callable(getattr(model, "pretrain_stage2_parameters")):
-                raise ValueError("basis_two_stage requires model.pretrain_stage2_parameters()")
-            if not hasattr(model, "pretrain_stage2_router") or not callable(getattr(model, "pretrain_stage2_router")):
-                raise ValueError("basis_two_stage requires model.pretrain_stage2_router(x)")
-            opt = torch.optim.Adam(
-                list(model.pretrain_stage2_parameters()),
-                lr=cfg.pretrain.lr,
-                betas=(0.9, 0.999),
-            )
-            start_time = time.time()
-            for epoch in range(1, stage2_epochs + 1):
-                model.train()
-                epoch_loss = 0.0
-                steps = 0
-                iterator = coord_loader
-                if tqdm is not None:
-                    iterator = tqdm(coord_loader, desc=f"pretrain_s2 {epoch}/{stage2_epochs}", leave=False)
-                for xb in iterator:
-                    xb = xb.to(device)
-                    if not hasattr(model, "pretrain_teacher_shared_feat") or not callable(getattr(model, "pretrain_teacher_shared_feat")):
-                        raise ValueError("basis_two_stage requires model.pretrain_teacher_shared_feat(x)")
-                    shared_teacher = model.pretrain_teacher_shared_feat(xb).detach()
-                    probs, masks, expert_feats = model.pretrain_stage2_router(
-                        xb,
-                        temperature=cfg.pretrain.stage2_temperature,
-                    )
-                    expert_feats = expert_feats.detach()
-                    h_router = torch.sum(probs.unsqueeze(-1) * expert_feats.unsqueeze(1), dim=2)  # (B, V, F)
-                    bsz, num_views, feat_dim = h_router.shape
-                    shared_router = model.decoder(h_router.reshape(-1, feat_dim)).reshape(bsz, num_views, -1)
-                    shared_teacher_exp = shared_teacher.unsqueeze(1).expand_as(shared_router)
-                    loss_recon = F.mse_loss(shared_router, shared_teacher_exp)
-                    loss = loss_recon
-                    if cfg.pretrain.stage2_entropy_weight > 0.0:
-                        eps = 1e-9
-                        ent = -(probs * (probs + eps).log()).sum(dim=-1).mean()
-                        loss = loss - cfg.pretrain.stage2_entropy_weight * ent
-                    if cfg.pretrain.stage2_lam_eq > 0.0:
-                        loss_eq = load_balance_loss(probs, masks)
-                        loss = loss + cfg.pretrain.stage2_lam_eq * loss_eq
-                    opt.zero_grad()
-                    loss.backward()
-                    opt.step()
-                    epoch_loss += loss.item()
-                    steps += 1
-                epoch_loss /= max(steps, 1)
-                elapsed = time.time() - start_time
-                logger.info(
-                    "Pretrain stage2 %s/%s loss=%.6e time=%.1fs",
-                    epoch,
-                    stage2_epochs,
-                    epoch_loss,
-                    elapsed,
-                )
-        return
-
     assignments_cfg = PretrainAssignmentConfig(
         method=cfg.pretrain.assignments_method,
         seed=int(cfg.pretrain.cluster_seed),
@@ -844,7 +659,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             xb = xb.to(device, non_blocking=True)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device, non_blocking=True) for name, tensor in yb.items()}
-                loss, loss_recon, loss_eq, loss_div, loss_orth, aux, recon_breakdown = _compute_multiview_loss(
+                loss, loss_recon, aux, recon_breakdown = _compute_multiview_loss(
                     model,
                     xb,
                     yb,
@@ -881,12 +696,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         aux = {}
                 loss = criterion(pred, yb)
                 loss_recon = loss
-                loss_eq = torch.zeros((), device=loss.device)
-                loss_div = torch.zeros((), device=loss.device)
-                loss_orth = torch.zeros((), device=loss.device)
-                if cfg.gam_orth > 0.0 and "expert_feats" in aux:
-                    loss_orth = orth_loss(aux["expert_feats"], eps=cfg.orth_eps)
-                    loss = loss + cfg.gam_orth * loss_orth
                 if hasattr(model, "regularization_loss"):
                     reg = model.regularization_loss()
                     loss = loss + (reg if torch.is_tensor(reg) else torch.tensor(reg, device=loss.device, dtype=loss.dtype))
@@ -967,7 +776,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         val_loss,
                         elapsed,
                     )
-                if steps_seen > 0 and multiview_per_view_acc:
+                if steps_seen > 0:
                     metric_tag = "mse" if str(cfg.loss_type).strip().lower() == "mse" else "l1"
                     logger.info(
                         "Recon loss (%s): attr_sum=%.6e dim_normalized=%.6e selected[%s]=%.6e",
@@ -977,18 +786,6 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         multiview_selected_mode,
                         multiview_recon_selected_acc / float(steps_seen),
                     )
-                    for name in sorted(multiview_per_view_acc.keys()):
-                        stats = multiview_per_view_acc[name]
-                        logger.info(
-                            "Recon breakdown [%s]: dim=%d weight(avg)=%.3f %s(sum_dims)=%.6e %s(per_dim_avg)=%.6e",
-                            name,
-                            int(round(stats["dim"])),
-                            stats["weight_sum"] / float(steps_seen),
-                            metric_tag,
-                            stats["loss_sum_dims"] / float(steps_seen),
-                            metric_tag,
-                            stats["loss_per_dim"] / float(steps_seen),
-                        )
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(
@@ -1121,7 +918,7 @@ def evaluate(
             xb = xb.to(device)
             if _is_multiview_target(yb):
                 yb = {name: tensor.to(device) for name, tensor in yb.items()}
-                loss, _, _, _, _ = _compute_multiview_loss(
+                loss, _ = _compute_multiview_loss(
                     model,
                     xb,
                     yb,

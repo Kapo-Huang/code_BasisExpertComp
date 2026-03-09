@@ -180,61 +180,6 @@ class LightBasisExpert(nn.Module):
     def pretrain_parameters(self):
         return list(self.gating.parameters()) + list(self.view_embedding.parameters())
 
-    def pretrain_teacher_shared_feat(self, coords: torch.Tensor, teacher_mode: str = "random_topk"):
-        x_pe = self.pos_enc(coords)
-        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)  # (B, M, F)
-        mode = (teacher_mode or "uniform").strip().lower()
-        if mode == "uniform":
-            weights = torch.full(
-                (expert_feats.shape[0], self.num_experts),
-                1.0 / float(self.num_experts),
-                device=expert_feats.device,
-                dtype=expert_feats.dtype,
-            )
-        elif mode == "random_topk":
-            weights = torch.zeros(
-                (expert_feats.shape[0], self.num_experts),
-                device=expert_feats.device,
-                dtype=expert_feats.dtype,
-            )
-            k = max(1, min(self.top_k, self.num_experts))
-            idx = torch.randint(0, self.num_experts, (expert_feats.shape[0], k), device=expert_feats.device)
-            weights.scatter_(1, idx, 1.0 / float(k))
-        else:
-            raise ValueError(f"Unknown teacher_mode: {teacher_mode}")
-        h_teacher = torch.sum(expert_feats * weights.unsqueeze(-1), dim=1)
-        shared_teacher = self.decoder(h_teacher)
-        return shared_teacher
-
-    def pretrain_stage1_parameters(self):
-        return self.experts.parameters()
-
-    def pretrain_stage1_expert_feats(self, coords: torch.Tensor) -> torch.Tensor:
-        x_pe = self.pos_enc(coords)
-        return torch.stack([expert(x_pe) for expert in self.experts], dim=1)
-
-    def pretrain_stage2_parameters(self):
-        return list(self.gating.parameters()) + list(self.view_embedding.parameters())
-
-    def pretrain_stage2_router(self, coords: torch.Tensor, temperature: float = 1.0):
-        x_pe = self.pos_enc(coords)
-        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)
-        probs_list: List[torch.Tensor] = []
-        masks_list: List[torch.Tensor] = []
-        for view_idx in range(self.num_views):
-            view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
-            view_embed = self.view_embedding(view_ids)
-            _probs, logits = self.gating(x_pe, view_embed)
-            temp = float(temperature) if temperature is not None else 1.0
-            if temp <= 0:
-                temp = 1.0
-            probs = torch.softmax(logits / temp, dim=-1)
-            probs_list.append(probs)
-            masks_list.append(torch.ones_like(probs))
-        probs = torch.stack(probs_list, dim=1)
-        masks = torch.stack(masks_list, dim=1)
-        return probs, masks, expert_feats
-
 
 def build_light_basis_expert_from_config(cfg: Dict, view_specs: Dict[str, int]) -> LightBasisExpert:
     base_dim = cfg.get("base_dim")

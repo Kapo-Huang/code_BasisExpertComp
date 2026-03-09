@@ -231,34 +231,6 @@ class BasisExpertsAttentionLightPE(nn.Module):
     def pretrain_parameters(self):
         return list(self.gating.parameters()) + list(self.view_embedding.parameters())
 
-    def pretrain_stage1_parameters(self):
-        return self.experts.parameters()
-
-    def pretrain_stage1_expert_feats(self, coords: torch.Tensor) -> torch.Tensor:
-        x_pe = self.pos_enc(coords)
-        return torch.stack([expert(x_pe) for expert in self.experts], dim=1)
-
-    def pretrain_stage2_parameters(self):
-        return list(self.gating.parameters()) + list(self.view_embedding.parameters())
-
-    def pretrain_stage2_router(self, coords: torch.Tensor):
-        x_pe = self.pos_enc(coords)
-        expert_feats = torch.stack([expert(x_pe) for expert in self.experts], dim=1)
-        probs_list: List[torch.Tensor] = []
-        masks_list: List[torch.Tensor] = []
-        for view_idx in range(self.num_views):
-            view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
-            view_embed = self.view_embedding(view_ids)
-            probs, _ = self.gating(x_pe, view_embed)
-            mask = self._topk_mask(probs)
-            masked_probs = probs * mask
-            masked_probs = masked_probs / (masked_probs.sum(dim=-1, keepdim=True) + 1e-9)
-            probs_list.append(masked_probs)
-            masks_list.append(mask)
-        probs = torch.stack(probs_list, dim=1)
-        masks = torch.stack(masks_list, dim=1)
-        return probs, masks, expert_feats
-
 
 def build_basisExperts_attention_light_pe_from_config(
     cfg: Dict, view_specs: Dict[str, int]
