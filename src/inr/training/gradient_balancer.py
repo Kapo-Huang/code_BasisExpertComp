@@ -21,6 +21,118 @@ def _flatten_grads(
     return torch.cat(flat_parts, dim=0)
 
 
+def get_shared_named_params(model: torch.nn.Module) -> List[Tuple[str, torch.nn.Parameter]]:
+    return [
+        (name, param)
+        for name, param in model.named_parameters()
+        if param.requires_grad and not name.startswith("heads.")
+    ]
+
+
+def flatten_named_grads(
+    grads: Sequence[Optional[torch.Tensor]],
+    named_params: Sequence[Tuple[str, torch.nn.Parameter]],
+) -> torch.Tensor:
+    flat_parts = []
+    for grad, (_, param) in zip(grads, named_params):
+        grad_tensor = grad if grad is not None else torch.zeros_like(param)
+        flat_parts.append(grad_tensor.reshape(-1))
+    if not flat_parts:
+        if named_params:
+            return torch.zeros(0, device=named_params[0][1].device)
+        return torch.zeros(0)
+    return torch.cat(flat_parts, dim=0)
+
+
+class GradNormBalancer:
+    def __init__(self, task_names, cfg, device):
+        self.task_names = list(task_names)
+        self.task_weights = torch.nn.Parameter(torch.ones(len(self.task_names), device=device))
+        self.initial_losses = None
+        self.alpha = float(cfg.gradnorm_alpha)
+        self.optimizer = torch.optim.Adam([self.task_weights], lr=float(cfg.gradnorm_lr))
+
+    def get_weight_dict(self) -> Dict[str, float]:
+        weights = self.task_weights.detach().cpu().tolist()
+        return {task_name: float(weight) for task_name, weight in zip(self.task_names, weights)}
+
+    def build_weighted_loss(
+        self,
+        task_losses: Dict[str, torch.Tensor],
+    ) -> Tuple[torch.Tensor, torch.Tensor]:
+        if list(task_losses.keys()) != self.task_names:
+            raise ValueError(
+                f"GradNorm task order mismatch. Expected {self.task_names}, got {list(task_losses.keys())}"
+            )
+        missing_tasks = [task_name for task_name in self.task_names if task_name not in task_losses]
+        if missing_tasks:
+            raise ValueError(f"Missing task losses for GradNorm: {missing_tasks}")
+
+        ordered_losses = torch.stack([task_losses[task_name] for task_name in self.task_names], dim=0)
+        weighted_loss = torch.sum(self.task_weights * ordered_losses)
+        return weighted_loss, ordered_losses
+
+    def update(
+        self,
+        task_losses: Dict[str, torch.Tensor],
+        model: torch.nn.Module,
+    ) -> Dict[str, object]:
+        _, ordered_losses = self.build_weighted_loss(task_losses)
+        if self.initial_losses is None:
+            self.initial_losses = ordered_losses.detach().clamp_min(1e-12)
+
+        shared_named_params = get_shared_named_params(model)
+        if not shared_named_params:
+            raise ValueError("No shared trainable parameters found for GradNorm.")
+
+        shared_params = [param for _, param in shared_named_params]
+        grad_norm_list = []
+        for index, loss_tensor in enumerate(ordered_losses):
+            weighted_task_loss_i = self.task_weights[index] * loss_tensor
+            shared_grads = torch.autograd.grad(
+                weighted_task_loss_i,
+                shared_params,
+                allow_unused=True,
+                create_graph=True,
+                retain_graph=True,
+            )
+            flat_shared_grad = flatten_named_grads(shared_grads, shared_named_params)
+            grad_norm_list.append(torch.norm(flat_shared_grad, p=2))
+        grad_norms = torch.stack(grad_norm_list, dim=0)
+
+        loss_ratios = ordered_losses.detach() / self.initial_losses
+        relative_rates = loss_ratios / loss_ratios.mean().clamp_min(1e-12)
+        grad_norm_avg = grad_norms.detach().mean()
+        target_grad_norms = grad_norm_avg * (relative_rates.detach() ** self.alpha)
+
+        grad_loss = torch.sum(torch.abs(grad_norms - target_grad_norms))
+
+        self.optimizer.zero_grad()
+        grad_loss.backward()
+        self.optimizer.step()
+
+        with torch.no_grad():
+            self.task_weights.data.clamp_(min=1e-6)
+            self.task_weights.data = self.task_weights.data * (
+                len(self.task_names) / self.task_weights.data.sum().clamp_min(1e-12)
+            )
+
+        weighted_loss_after, _ = self.build_weighted_loss(task_losses)
+        return {
+            "weighted_loss": weighted_loss_after,
+            "grad_loss": float(grad_loss.detach().item()),
+            "weights": self.get_weight_dict(),
+            "grad_norms": {
+                task_name: float(value)
+                for task_name, value in zip(self.task_names, grad_norms.detach().cpu().tolist())
+            },
+            "relative_rates": {
+                task_name: float(value)
+                for task_name, value in zip(self.task_names, relative_rates.detach().cpu().tolist())
+            },
+        }
+
+
 def _set_flat_grad(params: Sequence[torch.nn.Parameter], flat_grad: torch.Tensor) -> None:
     offset = 0
     for param in params:

@@ -24,7 +24,7 @@ from inr.training.losses import (
     reconstruction_loss_with_breakdown,
 )
 from inr.training.gradient_diagnostics import diagnose_multitask_gradients
-from inr.training.gradient_balancer import _apply_multitask_gradient
+from inr.training.gradient_balancer import GradNormBalancer, _apply_multitask_gradient
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
 from skimage.metrics import peak_signal_noise_ratio as psnr
@@ -91,6 +91,8 @@ class GradientBalancerConfig:
     cagrad_c: float = 0.4
     solver_max_iter: int = 50
     solver_lr: float = 0.25
+    gradnorm_alpha: float = 0.5
+    gradnorm_lr: float = 1e-3
 
 
 @dataclass
@@ -604,6 +606,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
     best_state = None
     no_improve = 0
     expert_select_counts = None
+    gradnorm_balancer = None
     sampler = getattr(train_loader, "sampler", None)
     timestep_sampler = sampler if isinstance(sampler, TimeStepRandomSampler) else None
     total_timesteps = None
@@ -671,6 +674,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         multiview_selected_mode = "attr_sum"
         multiview_weight_mode = "static"
         last_grad_balance_state = None
+        last_gradnorm_state = None
         last_grad_diag_state = None
         data_time = 0.0
         compute_time = 0.0
@@ -738,16 +742,31 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                 elif hasattr(model, "indicator_regularization"):
                     reg = model.indicator_regularization()
                     loss = loss + (reg if torch.is_tensor(reg) else torch.tensor(reg, device=loss.device, dtype=loss.dtype))
-            optim.zero_grad()
+            loss_for_update = loss
             if is_multiview_batch:
+                balancer_method = str(cfg.gradient_balancer.method).strip().lower()
                 if cfg.gradient_balancer.enabled and task_losses is not None and len(task_losses) > 1:
-                    last_grad_balance_state = _apply_multitask_gradient(model, task_losses, cfg)
+                    if balancer_method in {"pcgrad", "mgda", "cagrad"}:
+                        optim.zero_grad()
+                        last_grad_balance_state = _apply_multitask_gradient(model, task_losses, cfg)
+                    elif balancer_method == "gradnorm":
+                        if gradnorm_balancer is None:
+                            gradnorm_balancer = GradNormBalancer(task_losses.keys(), cfg.gradient_balancer, device)
+                        last_gradnorm_state = gradnorm_balancer.update(task_losses, model)
+                        weighted_loss = last_gradnorm_state["weighted_loss"]
+                        loss_for_update = weighted_loss
+                        optim.zero_grad()
+                        weighted_loss.backward()
+                    else:
+                        raise ValueError(f"Unsupported gradient balancer method: {balancer_method}")
                 else:
+                    optim.zero_grad()
                     loss.backward()
             else:
+                optim.zero_grad()
                 loss.backward()
             optim.step()
-            epoch_loss += loss.item()
+            epoch_loss += loss_for_update.item()
             steps_seen += 1
             global_step += 1
             # loss_orth is only for logging; zero if not used
@@ -840,6 +859,28 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         logger.info("Gradient balancer [%s]: %s", method, weight_text)
                     elif method == "pcgrad":
                         logger.info("Gradient balancer [pcgrad]: applied")
+                if last_gradnorm_state is not None:
+                    gradnorm_weights = last_gradnorm_state.get("weights") or {}
+                    weights_text = " ".join(
+                        f"{name}={float(value):.6f}"
+                        for name, value in gradnorm_weights.items()
+                    )
+                    logger.info("GradNorm weights: %s", weights_text)
+
+                    gradnorm_grad_norms = last_gradnorm_state.get("grad_norms") or {}
+                    grad_norms_text = " ".join(
+                        f"{name}={float(value):.6f}"
+                        for name, value in gradnorm_grad_norms.items()
+                    )
+                    logger.info("GradNorm grad_norms: %s", grad_norms_text)
+
+                    gradnorm_relative_rates = last_gradnorm_state.get("relative_rates") or {}
+                    relative_rates_text = " ".join(
+                        f"{name}={float(value):.6f}"
+                        for name, value in gradnorm_relative_rates.items()
+                    )
+                    logger.info("GradNorm relative_rates: %s", relative_rates_text)
+                    logger.info("GradNorm grad_loss: %.6f", float(last_gradnorm_state.get("grad_loss", 0.0)))
                 if last_grad_diag_state is not None:
                     grad_norms = last_grad_diag_state.get("grad_norms") or {}
                     grad_norm_text = " ".join(

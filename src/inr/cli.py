@@ -41,6 +41,7 @@ from inr.models.sota.stsr_inr import (
     build_stsr_inr_multiview_from_config,
 )
 from inr.training.loops import (
+    GradientBalancerConfig,
     GradientDiagConfig,
     PretrainConfig,
     TimeStepCurriculumConfig,
@@ -389,6 +390,16 @@ def main():
         stride_groups=int(timestep_curriculum_raw.get("stride_groups", 0)),
         epochs_per_group=int(timestep_curriculum_raw.get("epochs_per_group", 0)),
     )
+    gradient_balancer_raw = train_cfg_raw.get("gradient_balancer", {}) or {}
+    gradient_balancer_cfg = GradientBalancerConfig(
+        enabled=bool(gradient_balancer_raw.get("enabled", False)),
+        method=str(gradient_balancer_raw.get("method", "pcgrad")),
+        cagrad_c=float(gradient_balancer_raw.get("cagrad_c", 0.4)),
+        solver_max_iter=int(gradient_balancer_raw.get("solver_max_iter", 50)),
+        solver_lr=float(gradient_balancer_raw.get("solver_lr", 0.25)),
+        gradnorm_alpha=float(gradient_balancer_raw.get("gradnorm_alpha", 0.5)),
+        gradnorm_lr=float(gradient_balancer_raw.get("gradnorm_lr", 1.0e-3)),
+    )
     gradient_diag_raw = train_cfg_raw.get("gradient_diag", {}) or {}
     gradient_diag_cfg = GradientDiagConfig(
         enabled=bool(gradient_diag_raw.get("enabled", False)),
@@ -423,6 +434,7 @@ def main():
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
+        gradient_balancer=gradient_balancer_cfg,
         gradient_diag=gradient_diag_cfg,
     )
 
