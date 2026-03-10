@@ -93,6 +93,7 @@ class GradientBalancerConfig:
     solver_lr: float = 0.25
     gradnorm_alpha: float = 0.5
     gradnorm_lr: float = 1e-3
+    gradnorm_every_n_steps: int = 100
 
 
 @dataclass
@@ -625,6 +626,12 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             freeze_epoch = max(1, int(math.ceil(cfg.epochs * freeze_at)))
         else:
             freeze_epoch = int(freeze_at)
+    if (
+        cfg.gradient_balancer.enabled
+        and str(cfg.gradient_balancer.method).strip().lower() == "gradnorm"
+        and int(cfg.gradient_balancer.gradnorm_every_n_steps) <= 0
+    ):
+        raise ValueError("gradient_balancer.gradnorm_every_n_steps must be positive when GradNorm is enabled")
     if cfg.gradient_diag.enabled and int(cfg.gradient_diag.every_n_steps) <= 0:
         raise ValueError("gradient_diag.every_n_steps must be positive when gradient diagnostics are enabled")
 
@@ -752,7 +759,8 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     elif balancer_method == "gradnorm":
                         if gradnorm_balancer is None:
                             gradnorm_balancer = GradNormBalancer(task_losses.keys(), cfg.gradient_balancer, device)
-                        last_gradnorm_state = gradnorm_balancer.update(task_losses, model)
+                        if global_step % int(cfg.gradient_balancer.gradnorm_every_n_steps) == 0:
+                            last_gradnorm_state = gradnorm_balancer.update(task_losses, model)
                         weighted_loss = gradnorm_balancer.build_weighted_loss_only(task_losses)
                         loss_for_update = weighted_loss
                         optim.zero_grad()

@@ -399,6 +399,7 @@ def main():
         solver_lr=float(gradient_balancer_raw.get("solver_lr", 0.25)),
         gradnorm_alpha=float(gradient_balancer_raw.get("gradnorm_alpha", 0.5)),
         gradnorm_lr=float(gradient_balancer_raw.get("gradnorm_lr", 1.0e-3)),
+        gradnorm_every_n_steps=int(gradient_balancer_raw.get("gradnorm_every_n_steps", 100)),
     )
     gradient_diag_raw = train_cfg_raw.get("gradient_diag", {}) or {}
     gradient_diag_cfg = GradientDiagConfig(
