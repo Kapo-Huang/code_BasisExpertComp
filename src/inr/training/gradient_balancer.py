@@ -72,6 +72,10 @@ class GradNormBalancer:
         weighted_loss = torch.sum(self.task_weights * ordered_losses)
         return weighted_loss, ordered_losses
 
+    def build_weighted_loss_only(self, task_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+        weighted_loss, _ = self.build_weighted_loss(task_losses)
+        return weighted_loss
+
     def update(
         self,
         task_losses: Dict[str, torch.Tensor],
@@ -108,7 +112,7 @@ class GradNormBalancer:
         grad_loss = torch.sum(torch.abs(grad_norms - target_grad_norms))
 
         self.optimizer.zero_grad()
-        grad_loss.backward()
+        torch.autograd.backward(grad_loss, inputs=[self.task_weights], retain_graph=True)
         self.optimizer.step()
 
         with torch.no_grad():
@@ -117,9 +121,7 @@ class GradNormBalancer:
                 len(self.task_names) / self.task_weights.data.sum().clamp_min(1e-12)
             )
 
-        weighted_loss_after, _ = self.build_weighted_loss(task_losses)
         return {
-            "weighted_loss": weighted_loss_after,
             "grad_loss": float(grad_loss.detach().item()),
             "weights": self.get_weight_dict(),
             "grad_norms": {

@@ -753,7 +753,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         if gradnorm_balancer is None:
                             gradnorm_balancer = GradNormBalancer(task_losses.keys(), cfg.gradient_balancer, device)
                         last_gradnorm_state = gradnorm_balancer.update(task_losses, model)
-                        weighted_loss = last_gradnorm_state["weighted_loss"]
+                        weighted_loss = gradnorm_balancer.build_weighted_loss_only(task_losses)
                         loss_for_update = weighted_loss
                         optim.zero_grad()
                         weighted_loss.backward()
