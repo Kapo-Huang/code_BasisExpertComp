@@ -41,6 +41,7 @@ from inr.models.sota.stsr_inr import (
     build_stsr_inr_multiview_from_config,
 )
 from inr.training.loops import (
+    GradientDiagConfig,
     PretrainConfig,
     TimeStepCurriculumConfig,
     TrainingConfig,
@@ -388,6 +389,12 @@ def main():
         stride_groups=int(timestep_curriculum_raw.get("stride_groups", 0)),
         epochs_per_group=int(timestep_curriculum_raw.get("epochs_per_group", 0)),
     )
+    gradient_diag_raw = train_cfg_raw.get("gradient_diag", {}) or {}
+    gradient_diag_cfg = GradientDiagConfig(
+        enabled=bool(gradient_diag_raw.get("enabled", False)),
+        every_n_steps=int(gradient_diag_raw.get("every_n_steps", 200)),
+        max_layers_to_log=int(gradient_diag_raw.get("max_layers_to_log", 10)),
+    )
     train_cfg = TrainingConfig(
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
@@ -416,6 +423,7 @@ def main():
         lr_decay_step=int(train_cfg_raw.get("lr_decay_step", 0)),
         freeze_router_at=float(train_cfg_raw.get("freeze_router_at", 0.8)),
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
+        gradient_diag=gradient_diag_cfg,
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))

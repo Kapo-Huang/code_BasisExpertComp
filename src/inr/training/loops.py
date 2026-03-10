@@ -23,6 +23,7 @@ from inr.training.losses import (
     reconstruction_loss,
     reconstruction_loss_with_breakdown,
 )
+from inr.training.gradient_diagnostics import diagnose_multitask_gradients
 from inr.training.gradient_balancer import _apply_multitask_gradient
 from inr.pretrain.assignments import PretrainAssignmentConfig, compute_pretrain_assignments
 from inr.utils.io import save_checkpoint
@@ -93,6 +94,13 @@ class GradientBalancerConfig:
 
 
 @dataclass
+class GradientDiagConfig:
+    enabled: bool = False
+    every_n_steps: int = 200
+    max_layers_to_log: int = 10
+
+
+@dataclass
 class TrainingConfig:
     epochs: int = 100
     batch_size: int = 8000
@@ -122,6 +130,7 @@ class TrainingConfig:
     freeze_router_at: float = 0.8
     hard_topk_warmup_epochs: int = 0
     gradient_balancer: GradientBalancerConfig = field(default_factory=GradientBalancerConfig)
+    gradient_diag: GradientDiagConfig = field(default_factory=GradientDiagConfig)
 
 
 def _unpack_batch(batch):
@@ -613,6 +622,10 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             freeze_epoch = max(1, int(math.ceil(cfg.epochs * freeze_at)))
         else:
             freeze_epoch = int(freeze_at)
+    if cfg.gradient_diag.enabled and int(cfg.gradient_diag.every_n_steps) <= 0:
+        raise ValueError("gradient_diag.every_n_steps must be positive when gradient diagnostics are enabled")
+
+    global_step = 0
 
     for epoch in range(1, cfg.epochs + 1):
         hard_topk = True
@@ -658,6 +671,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
         multiview_selected_mode = "attr_sum"
         multiview_weight_mode = "static"
         last_grad_balance_state = None
+        last_grad_diag_state = None
         data_time = 0.0
         compute_time = 0.0
         iterator = train_loader
@@ -699,6 +713,13 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                     multiview_per_view_acc[name]["weight_sum"] += float(stats["weight"])
                     multiview_per_view_acc[name]["loss_sum_dims"] += float(stats["loss_sum_dims"])
                     multiview_per_view_acc[name]["loss_per_dim"] += float(stats["loss_per_dim"])
+                if (
+                    cfg.gradient_diag.enabled
+                    and task_losses is not None
+                    and len(task_losses) > 1
+                    and global_step % int(cfg.gradient_diag.every_n_steps) == 0
+                ):
+                    last_grad_diag_state = diagnose_multitask_gradients(task_losses, model)
             else:
                 yb = yb.to(device, non_blocking=True)
                 try:
@@ -728,6 +749,7 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
             optim.step()
             epoch_loss += loss.item()
             steps_seen += 1
+            global_step += 1
             # loss_orth is only for logging; zero if not used
             if aux and "probs" in aux:
                 probs = aux["probs"].detach()
@@ -818,6 +840,28 @@ def train_model(model: torch.nn.Module, dataset: Dataset, cfg: TrainingConfig):
                         logger.info("Gradient balancer [%s]: %s", method, weight_text)
                     elif method == "pcgrad":
                         logger.info("Gradient balancer [pcgrad]: applied")
+                if last_grad_diag_state is not None:
+                    grad_norms = last_grad_diag_state.get("grad_norms") or {}
+                    grad_norm_text = " ".join(
+                        f"{name}={float(value):.6f}"
+                        for name, value in grad_norms.items()
+                    )
+                    logger.info("Gradient norms: %s", grad_norm_text)
+
+                    pairwise_cos = last_grad_diag_state.get("pairwise_cos") or {}
+                    pairwise_text = " ".join(
+                        f"{task_i}-{task_j}={float(value):.6f}"
+                        for (task_i, task_j), value in pairwise_cos.items()
+                    )
+                    logger.info("Pairwise cosine similarity: %s", pairwise_text)
+
+                    max_layers_to_log = int(cfg.gradient_diag.max_layers_to_log)
+                    layer_conflicts = list(last_grad_diag_state.get("layer_conflicts") or [])[:max_layers_to_log]
+                    layer_text = " | ".join(
+                        f"{item['layer']}: avg_cos={float(item['avg_cos']):.6f}, min_cos={float(item['min_cos']):.6f}, neg_ratio={float(item['neg_ratio']):.6f}"
+                        for item in layer_conflicts
+                    )
+                    logger.info("Most conflicting layers: %s", layer_text)
             if expert_select_counts is not None:
                 sumCount = expert_select_counts.sum().item()
                 counts_text = " ".join(
