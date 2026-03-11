@@ -56,7 +56,7 @@ class LinearLayer(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_features: int, out_features: int, nonlinearity: str = "relu"):
+    def __init__(self, in_features: int, out_features: int, nonlinearity: str = "relu", is_first: bool = False):
         super().__init__()
         nls_and_inits = {
             "sine": Sine(),
@@ -70,7 +70,7 @@ class ResBlock(nn.Module):
 
         self.nl = nls_and_inits[nonlinearity]
         self.net = []
-        self.net.append(SineLayer(in_features, out_features))
+        self.net.append(SineLayer(in_features, out_features, is_first=is_first))
         self.net.append(SineLayer(out_features, out_features))
         self.flag = in_features != out_features
         if self.flag:
@@ -89,7 +89,7 @@ class CoordNet(nn.Module):
         super().__init__()
         self.num_res = num_res
         self.net = []
-        self.net.append(ResBlock(in_features, init_features))
+        self.net.append(ResBlock(in_features, init_features, is_first=True))
         self.net.append(ResBlock(init_features, 2 * init_features))
         self.net.append(ResBlock(2 * init_features, 4 * init_features))
         for _ in range(self.num_res):
