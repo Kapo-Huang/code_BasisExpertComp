@@ -1,6 +1,102 @@
 from typing import Dict, List, Optional, Sequence, Tuple
 
 import torch
+import torch.nn as nn
+
+
+class MultiAttrEMALoss(nn.Module):
+    def __init__(
+        self,
+        attr_names,
+        beta: float = 0.95,
+        eps: float = 1e-8,
+        w_min: float = 0.2,
+        w_max: float = 5.0,
+        warmup_steps: int = 0,
+    ):
+        super().__init__()
+        attr_names = list(attr_names)
+        if not attr_names:
+            raise ValueError("attr_names must be non-empty")
+        if len(set(attr_names)) != len(attr_names):
+            raise ValueError("attr_names must not contain duplicates")
+
+        self.attr_names = attr_names
+        self.beta = float(beta)
+        self.eps = float(eps)
+        self.w_min = float(w_min)
+        self.w_max = float(w_max)
+        self.warmup_steps = int(warmup_steps)
+
+        self.register_buffer("ema", torch.ones(len(self.attr_names)))
+        self.register_buffer("step", torch.zeros((), dtype=torch.long))
+
+    @torch.no_grad()
+    def _update_ema(self, losses_vec: torch.Tensor):
+        self.ema.mul_(self.beta).add_(losses_vec * (1.0 - self.beta))
+
+    @torch.no_grad()
+    def _weights_from_ema(self) -> torch.Tensor:
+        w = 1.0 / (self.ema + self.eps)
+        w = w / (w.mean() + self.eps)
+        return torch.clamp(w, self.w_min, self.w_max)
+
+    def _to_ordered_tensor(self, per_attr_losses: Dict[str, torch.Tensor]) -> torch.Tensor:
+        losses = []
+        for name in self.attr_names:
+            if name not in per_attr_losses:
+                raise KeyError(f"Missing per-attribute loss for key '{name}'")
+            losses.append(per_attr_losses[name])
+        return torch.stack(losses, dim=0)
+
+    def forward(
+        self,
+        per_attr_losses: Dict[str, torch.Tensor],
+        *,
+        return_details: bool = False,
+        return_tensors: bool = False,
+        update_ema: bool = True,
+    ):
+        losses_t = self._to_ordered_tensor(per_attr_losses)
+        step_now = int(self.step.detach().item())
+
+        if update_ema:
+            self._update_ema(losses_t.detach())
+
+        if step_now >= self.warmup_steps:
+            with torch.no_grad():
+                w = self._weights_from_ema()
+        else:
+            w = torch.ones_like(losses_t)
+
+        if update_ema:
+            with torch.no_grad():
+                self.step.add_(1)
+
+        w = w.to(device=losses_t.device, dtype=losses_t.dtype)
+        total = torch.sum(w * losses_t)
+
+        if not return_details and not return_tensors:
+            return total
+
+        details = None
+        if return_details:
+            details = {
+                "per_attr_loss": {
+                    n: float(losses_t[i].detach().item()) for i, n in enumerate(self.attr_names)
+                },
+                "ema": {n: float(self.ema[i].detach().item()) for i, n in enumerate(self.attr_names)},
+                "weights": {n: float(w[i].detach().item()) for i, n in enumerate(self.attr_names)},
+                "total": float(total.detach().item()),
+                "step": int(self.step.detach().item()),
+                "warmup_steps": int(self.warmup_steps),
+            }
+
+        if return_details and return_tensors:
+            return total, losses_t, w, details
+        if return_details:
+            return total, details
+        return total, losses_t, w
 
 
 def _get_trainable_params(model: torch.nn.Module) -> List[torch.nn.Parameter]:

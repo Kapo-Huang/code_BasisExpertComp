@@ -43,6 +43,7 @@ from inr.models.sota.stsr_inr import (
 from inr.training.loops import (
     GradientBalancerConfig,
     GradientDiagConfig,
+    MultiAttrEMALossConfig,
     PretrainConfig,
     TimeStepCurriculumConfig,
     TrainingConfig,
@@ -407,6 +408,15 @@ def main():
         every_n_steps=int(gradient_diag_raw.get("every_n_steps", 200)),
         max_layers_to_log=int(gradient_diag_raw.get("max_layers_to_log", 10)),
     )
+    multiview_ema_raw = train_cfg_raw.get("multiview_ema_loss", {}) or {}
+    multiview_ema_cfg = MultiAttrEMALossConfig(
+        enabled=bool(multiview_ema_raw.get("enabled", False)),
+        beta=float(multiview_ema_raw.get("beta", 0.95)),
+        eps=float(multiview_ema_raw.get("eps", 1e-8)),
+        w_min=float(multiview_ema_raw.get("w_min", 0.2)),
+        w_max=float(multiview_ema_raw.get("w_max", 5.0)),
+        warmup_steps=int(multiview_ema_raw.get("warmup_steps", 0)),
+    )
     train_cfg = TrainingConfig(
         epochs=int(train_cfg_raw.get("epochs", 100)),
         batch_size=int(train_cfg_raw.get("batch_size", 65536)),
@@ -437,6 +447,7 @@ def main():
         hard_topk_warmup_epochs=int(train_cfg_raw.get("hard_topk_warmup_epochs", 0)),
         gradient_balancer=gradient_balancer_cfg,
         gradient_diag=gradient_diag_cfg,
+        multiview_ema_loss=multiview_ema_cfg,
     )
 
     logger.info("Training config:\n%s", yaml.safe_dump(cfg, sort_keys=False))
