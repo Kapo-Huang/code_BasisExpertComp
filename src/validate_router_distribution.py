@@ -42,27 +42,6 @@ def _load_yaml(path: Path):
         return yaml.safe_load(f)
 
 
-def _match_checkpoint(epoch: int, ckpt_files):
-    if not ckpt_files:
-        return None
-    token = f"epoch{epoch}"
-    for ckpt in ckpt_files:
-        if token in ckpt.name:
-            return ckpt
-    return None
-
-
-def _collect_experiments(exp_root: Path):
-    exps = []
-    for child in sorted(exp_root.iterdir()):
-        if not child.is_dir():
-            continue
-        cfg_path = child / "configs" / "config.yaml"
-        if cfg_path.exists():
-            exps.append(child)
-    return exps
-
-
 def _torch_load_checkpoint(path: Path):
     def _register_numpy_core_aliases():
         import importlib
@@ -764,10 +743,17 @@ def _build_model_and_inputs(cfg, checkpoint, train_dir: Path):
     return model, volume_shape, view_specs
 
 
+def _resolve_run_name(cfg, config_path: Path, run_timestamp: str):
+    exp_id = str(cfg.get("exp_id", "")).strip()
+    base = exp_id if exp_id else config_path.stem
+    return f"{_safe_name(base)}_{run_timestamp}"
+
+
 def extract_router_distribution(
-    exp_dir: Path,
+    config_path: Path,
+    checkpoint_path: Path,
     outdir: Path,
-    epoch: int,
+    run_timestamp: str,
     attr_arg: str | None,
     time_index: int,
     task: str,
@@ -783,24 +769,20 @@ def extract_router_distribution(
     dpi: int,
 ):
     t_start = time.perf_counter()
-    cfg_path = exp_dir / "configs" / "config.yaml"
-    cfg = _load_yaml(cfg_path)
-    logger.info("[%s] Stage: load config = %.3fs", exp_dir.name, time.perf_counter() - t_start)
+    cfg = _load_yaml(config_path)
+    exp_name = _resolve_run_name(cfg, config_path, run_timestamp)
+    logger.info("[%s] Stage: load config = %.3fs", exp_name, time.perf_counter() - t_start)
 
     t_stage = time.perf_counter()
-    ckpt_files = sorted((exp_dir / "checkpoints").glob("*.pth"))
-    ckpt_path = _match_checkpoint(epoch, ckpt_files)
-    if ckpt_path is None:
-        raise FileNotFoundError(f"No checkpoint found for epoch {epoch} in {exp_dir}")
-    checkpoint = _torch_load_checkpoint(ckpt_path)
+    checkpoint = _torch_load_checkpoint(checkpoint_path)
     if "model_state" not in checkpoint:
-        raise KeyError(f"'model_state' missing in checkpoint: {ckpt_path}")
-    logger.info("[%s] Stage: load checkpoint = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+        raise KeyError(f"'model_state' missing in checkpoint: {checkpoint_path}")
+    logger.info("[%s] Stage: load checkpoint = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     train_dir = _resolve_train_dir(cfg["data"], train_dir_override)
     model, volume_shape, view_specs = _build_model_and_inputs(cfg, checkpoint, train_dir)
-    logger.info("[%s] Stage: build model/input specs = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+    logger.info("[%s] Stage: build model/input specs = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     normalize_inputs = bool(cfg["data"].get("normalize_inputs", cfg["data"].get("normalize", True)))
@@ -814,7 +796,7 @@ def extract_router_distribution(
         slice_info = _build_center_slices_info(volume_shape, time_index)
         coords_by_plane = _build_slice_coords(slice_info)
         coords_norm = _normalize_coords(coords_by_plane, volume_shape, normalize_inputs)
-    logger.info("[%s] Stage: prepare routing inputs = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+    logger.info("[%s] Stage: prepare routing inputs = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
@@ -823,7 +805,7 @@ def extract_router_distribution(
     probs_dict = None
     if generate_slices:
         probs_dict = _get_router_probs_for_planes(model, coords_norm, batch_size=batch_size, device=device)
-    logger.info("[%s] Stage: router slice inference = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+    logger.info("[%s] Stage: router slice inference = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     num_experts = int(getattr(model, "num_experts"))
     top_k_model = int(getattr(model, "top_k", min(2, num_experts)))
@@ -849,23 +831,23 @@ def extract_router_distribution(
             device=device,
             normalize_inputs=normalize_inputs,
         )
-        logger.info("[%s] Stage: temporal expected selection = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+        logger.info("[%s] Stage: temporal expected selection = %.3fs", exp_name, time.perf_counter() - t_stage)
     attr_to_idx = {name: i for i, name in enumerate(selected_attrs)}
 
     palette_hex = _build_palette(num_experts)
     if task == "time-curves":
-        run_tag = f"router_time_e{int(epoch)}"
+        run_tag = f"router_time_ts{run_timestamp}"
     elif task == "all":
         run_tag = (
-            f"router_all_e{int(epoch)}_t{int(time_index):03d}_top{int(top_k)}"
+            f"router_all_t{int(time_index):03d}_top{int(top_k)}_ts{run_timestamp}"
             f"_mx{int(slice_info['mx'])}_my{int(slice_info['my'])}_mz{int(slice_info['mz'])}"
         )
     else:
         run_tag = (
-            f"router_e{int(epoch)}_t{int(time_index):03d}_top{int(top_k)}"
+            f"router_t{int(time_index):03d}_top{int(top_k)}_ts{run_timestamp}"
             f"_mx{int(slice_info['mx'])}_my{int(slice_info['my'])}_mz{int(slice_info['mz'])}"
         )
-    run_dir = outdir / exp_dir.name / run_tag
+    run_dir = outdir / exp_name / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = []
@@ -902,8 +884,8 @@ def extract_router_distribution(
                     / f"{attr_safe}_top{int(rank_num):02d}_expert_map_orth.png"
                 )
                 title = (
-                    f"{exp_dir.name} | attr={attr_name} | Top-{rank_num} Expert Map | "
-                    f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']}) | epoch={epoch}"
+                    f"{exp_name} | attr={attr_name} | Top-{rank_num} Expert Map | "
+                    f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']})"
                 )
                 _plot_rank_expert_map(
                     rank_maps={
@@ -925,8 +907,8 @@ def extract_router_distribution(
                     / f"{attr_safe}_top{int(rank_num):02d}_expert_weight_orth.png"
                 )
                 rank_weight_title = (
-                    f"{exp_dir.name} | attr={attr_name} | Top-{rank_num} Expert-Weight Heatmap | "
-                    f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']}) | epoch={epoch}"
+                    f"{exp_name} | attr={attr_name} | Top-{rank_num} Expert-Weight Heatmap | "
+                    f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']})"
                 )
                 _plot_rank_weighted_expert_map(
                     rank_maps={
@@ -955,8 +937,8 @@ def extract_router_distribution(
                 / f"{attr_safe}_top{int(top_k)}_coverage_orth.png"
             )
             coverage_title = (
-                f"{exp_dir.name} | attr={attr_name} | Top-{top_k} Coverage Overlay | "
-                f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']}) | epoch={epoch}"
+                f"{exp_name} | attr={attr_name} | Top-{top_k} Coverage Overlay | "
+                f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']})"
             )
             _plot_topk_coverage(
                 topk_maps_by_plane=topk_maps_by_plane,
@@ -975,8 +957,8 @@ def extract_router_distribution(
                 / f"{attr_safe}_entropy_orth.png"
             )
             entropy_title = (
-                f"{exp_dir.name} | attr={attr_name} | Router Entropy | "
-                f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']}) | epoch={epoch}"
+                f"{exp_name} | attr={attr_name} | Router Entropy | "
+                f"t={time_index} | (mx,my,mz)=({slice_info['mx']},{slice_info['my']},{slice_info['mz']})"
             )
             _plot_entropy_map(
                 entropy_maps=entropy_maps,
@@ -997,8 +979,8 @@ def extract_router_distribution(
             for expert_idx in range(num_experts):
                 curve_path = run_dir / f"{attr_safe}_expert_{int(expert_idx):02d}_expected_selection_time.png"
                 curve_title = (
-                    f"{exp_dir.name} | attr={attr_name} | Expert {expert_idx} | "
-                    f"Expected Router Selection vs Time | epoch={epoch}"
+                    f"{exp_name} | attr={attr_name} | Expert {expert_idx} | "
+                    "Expected Router Selection vs Time"
                 )
                 _plot_expert_time_curve(
                     values=values_te[:, expert_idx],
@@ -1012,8 +994,8 @@ def extract_router_distribution(
 
             time_curve_combined_path = run_dir / f"{attr_safe}_experts_expected_selection_time_log.png"
             time_curve_combined_title = (
-                f"{exp_dir.name} | attr={attr_name} | All Experts | "
-                f"Expected Router Selection vs Time (log y) | epoch={epoch}"
+                f"{exp_name} | attr={attr_name} | All Experts | "
+                "Expected Router Selection vs Time (log y)"
             )
             _plot_all_experts_time_curve_log(
                 values_by_time_expert=values_te,
@@ -1041,9 +1023,9 @@ def extract_router_distribution(
                 "time_curve_npy_path": time_curve_npy_path,
             }
         )
-        logger.info("[%s] Attr %s done = %.3fs", exp_dir.name, attr_name, time.perf_counter() - t_attr)
+        logger.info("[%s] Attr %s done = %.3fs", exp_name, attr_name, time.perf_counter() - t_attr)
 
-    logger.info("[%s] Stage: total = %.3fs", exp_dir.name, time.perf_counter() - t_start)
+    logger.info("[%s] Stage: total = %.3fs", exp_name, time.perf_counter() - t_start)
     return outputs
 
 
@@ -1052,10 +1034,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Visualize basis expert router distribution (slices/time-curves/all)."
     )
-    parser.add_argument("--experiments", type=str, default="experiments", help="experiments root directory")
+    parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (.pth)")
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
-    parser.add_argument("--exp-id", type=str, default=None, help="single experiment id to visualize")
-    parser.add_argument("--epoch", type=int, required=True, help="epoch number to select checkpoint")
     parser.add_argument("--attr", type=str, default=None, help="single attr or comma list; default=all attrs")
     parser.add_argument(
         "--task",
@@ -1112,58 +1093,58 @@ def main():
     if args.weight_gamma <= 0:
         raise ValueError("--weight-gamma must be > 0")
 
-    exp_root = Path(args.experiments)
+    config_path = Path(args.config)
+    checkpoint_path = Path(args.checkpoint)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    run_timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-    if args.exp_id:
-        exp_dirs = [exp_root / args.exp_id]
-    else:
-        exp_dirs = _collect_experiments(exp_root)
+    try:
+        outputs = extract_router_distribution(
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            outdir=outdir,
+            run_timestamp=run_timestamp,
+            attr_arg=args.attr,
+            time_index=int(args.time_index),
+            task=str(args.task),
+            top_k_override=args.top_k,
+            batch_size=int(args.batch_size),
+            device_str=args.device,
+            train_dir_override=args.train_dir,
+            overlay_alpha=float(args.overlay_alpha),
+            overlay_decay=float(args.overlay_decay),
+            weight_floor=float(args.weight_floor),
+            weight_gamma=float(args.weight_gamma),
+            entropy_cmap=args.entropy_cmap,
+            dpi=int(args.dpi),
+        )
+    except Exception as exc:
+        logger.exception("Failed: %s (%s)", config_path, exc)
+        raise
 
-    for exp_dir in exp_dirs:
-        if not exp_dir.exists():
-            continue
-        try:
-            outputs = extract_router_distribution(
-                exp_dir=exp_dir,
-                outdir=outdir,
-                epoch=int(args.epoch),
-                attr_arg=args.attr,
-                time_index=int(args.time_index),
-                task=str(args.task),
-                top_k_override=args.top_k,
-                batch_size=int(args.batch_size),
-                device_str=args.device,
-                train_dir_override=args.train_dir,
-                overlay_alpha=float(args.overlay_alpha),
-                overlay_decay=float(args.overlay_decay),
-                weight_floor=float(args.weight_floor),
-                weight_gamma=float(args.weight_gamma),
-                entropy_cmap=args.entropy_cmap,
-                dpi=int(args.dpi),
-            )
-        except Exception as exc:
-            logger.exception("Failed: %s (%s)", exp_dir.name, exc)
-            continue
-
-        logger.info("Finished %s", exp_dir.name)
-        for item in outputs:
-            logger.info("  Attr: %s", item["attr"])
-            for idx, p in enumerate(item.get("top_rank_paths", []), start=1):
-                logger.info("    Top-%s expert map: %s", idx, p)
-            for idx, p in enumerate(item.get("top_rank_weight_paths", []), start=1):
-                logger.info("    Top-%s expert weight heatmap: %s", idx, p)
-            if item.get("coverage_path") is not None:
-                logger.info("    Top-k coverage: %s", item["coverage_path"])
-            if item.get("entropy_path") is not None:
-                logger.info("    Entropy: %s", item["entropy_path"])
-            for idx, p in enumerate(item.get("time_curve_paths", [])):
-                logger.info("    Expert %s expected-vs-time: %s", idx, p)
-            if item.get("time_curve_combined_path") is not None:
-                logger.info("    All-expert expected-vs-time (log y): %s", item["time_curve_combined_path"])
-            if item.get("time_curve_npy_path") is not None:
-                logger.info("    Time stats npy: %s", item["time_curve_npy_path"])
+    logger.info("Finished %s", config_path)
+    for item in outputs:
+        logger.info("  Attr: %s", item["attr"])
+        for idx, p in enumerate(item.get("top_rank_paths", []), start=1):
+            logger.info("    Top-%s expert map: %s", idx, p)
+        for idx, p in enumerate(item.get("top_rank_weight_paths", []), start=1):
+            logger.info("    Top-%s expert weight heatmap: %s", idx, p)
+        if item.get("coverage_path") is not None:
+            logger.info("    Top-k coverage: %s", item["coverage_path"])
+        if item.get("entropy_path") is not None:
+            logger.info("    Entropy: %s", item["entropy_path"])
+        for idx, p in enumerate(item.get("time_curve_paths", [])):
+            logger.info("    Expert %s expected-vs-time: %s", idx, p)
+        if item.get("time_curve_combined_path") is not None:
+            logger.info("    All-expert expected-vs-time (log y): %s", item["time_curve_combined_path"])
+        if item.get("time_curve_npy_path") is not None:
+            logger.info("    Time stats npy: %s", item["time_curve_npy_path"])
 
 
 if __name__ == "__main__":

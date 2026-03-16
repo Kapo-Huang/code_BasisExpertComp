@@ -34,27 +34,6 @@ def _load_yaml(path: Path):
         return yaml.safe_load(f)
 
 
-def _match_checkpoint(epoch: int, ckpt_files):
-    if not ckpt_files:
-        return None
-    token = f"epoch{epoch}"
-    for ckpt in ckpt_files:
-        if token in ckpt.name:
-            return ckpt
-    return None
-
-
-def _collect_experiments(exp_root: Path):
-    exps = []
-    for child in sorted(exp_root.iterdir()):
-        if not child.is_dir():
-            continue
-        cfg_path = child / "configs" / "config.yaml"
-        if cfg_path.exists():
-            exps.append(child)
-    return exps
-
-
 def _torch_load_checkpoint(path: Path):
     def _register_numpy_core_aliases():
         import importlib
@@ -446,10 +425,17 @@ def _build_dataset_and_model(cfg, attr_paths_for_model, checkpoint):
     return dataset, model
 
 
+def _resolve_run_name(cfg, config_path: Path, run_timestamp: str):
+    exp_id = str(cfg.get("exp_id", "")).strip()
+    base = exp_id if exp_id else config_path.stem
+    return f"{_safe_name(base)}_{run_timestamp}"
+
+
 def process_experiment(
-    exp_dir: Path,
+    config_path: Path,
+    checkpoint_path: Path,
     outdir: Path,
-    epoch: int,
+    run_timestamp: str,
     attr_arg: str | None,
     time_index: int,
     channel: int,
@@ -461,18 +447,15 @@ def process_experiment(
     train_dir_override: str | None,
 ):
     t_start = time.perf_counter()
-    cfg = _load_yaml(exp_dir / "configs" / "config.yaml")
-    logger.info("[%s] Stage: load config = %.3fs", exp_dir.name, time.perf_counter() - t_start)
+    cfg = _load_yaml(config_path)
+    exp_name = _resolve_run_name(cfg, config_path, run_timestamp)
+    logger.info("[%s] Stage: load config = %.3fs", exp_name, time.perf_counter() - t_start)
 
     t_stage = time.perf_counter()
-    ckpt_files = sorted((exp_dir / "checkpoints").glob("*.pth"))
-    ckpt_path = _match_checkpoint(epoch, ckpt_files)
-    if ckpt_path is None:
-        raise FileNotFoundError(f"No checkpoint found for epoch {epoch} in {exp_dir}")
-    checkpoint = _torch_load_checkpoint(ckpt_path)
+    checkpoint = _torch_load_checkpoint(checkpoint_path)
     if "model_state" not in checkpoint:
-        raise KeyError(f"'model_state' missing in {ckpt_path}")
-    logger.info("[%s] Stage: load checkpoint = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+        raise KeyError(f"'model_state' missing in {checkpoint_path}")
+    logger.info("[%s] Stage: load checkpoint = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     train_dir = _resolve_train_dir(cfg["data"], train_dir_override)
@@ -480,17 +463,17 @@ def process_experiment(
     volume_shape = cfg["data"].get("volume_shape")
     attr_paths, dropped = _filter_attr_paths_by_shape(attr_paths, volume_shape)
     if dropped:
-        logger.warning("[%s] Dropped by shape mismatch: %s", exp_dir.name, sorted(dropped.keys()))
+        logger.warning("[%s] Dropped by shape mismatch: %s", exp_name, sorted(dropped.keys()))
     if not attr_paths:
-        raise ValueError(f"No valid train attr_paths for {exp_dir.name}")
-    logger.info("[%s] Stage: resolve train attrs = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+        raise ValueError(f"No valid train attr_paths for {exp_name}")
+    logger.info("[%s] Stage: resolve train attrs = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     t_stage = time.perf_counter()
     dataset, model = _build_dataset_and_model(cfg, attr_paths, checkpoint)
     device = torch.device(device_str or ("cuda" if torch.cuda.is_available() else "cpu"))
     model = model.to(device)
     model.eval()
-    logger.info("[%s] Stage: build model = %.3fs", exp_dir.name, time.perf_counter() - t_stage)
+    logger.info("[%s] Stage: build model = %.3fs", exp_name, time.perf_counter() - t_stage)
 
     info = _build_center_slices_info(dataset.volume_shape, time_index)
     coords = _build_slice_coords(info)
@@ -500,16 +483,16 @@ def process_experiment(
         coords = _normalize_coords(coords, x_mean=x_mean, x_std=x_std)
 
     run_tag = (
-        f"basis_e{int(epoch)}_t{int(info['t']):03d}_ch{int(channel)}"
+        f"basis_t{int(info['t']):03d}_ch{int(channel)}"
         f"_mx{int(info['mx'])}_my{int(info['my'])}_mz{int(info['mz'])}"
     )
-    run_dir = outdir / exp_dir.name / run_tag
+    run_dir = outdir / exp_name / run_tag
     run_dir.mkdir(parents=True, exist_ok=True)
 
     selected_attrs = _parse_requested_attrs(attr_arg, attr_paths.keys())
     logger.info(
         "[%s] Start slicing: t=%s center=(mx=%s,my=%s,mz=%s), attrs=%s",
-        exp_dir.name,
+        exp_name,
         info["t"],
         info["mx"],
         info["my"],
@@ -556,7 +539,7 @@ def process_experiment(
         _plot_orthogonal_slices(
             slices=gt_slices,
             outpath=gt_path,
-            title=f"{exp_dir.name} | {attr_name} | GT | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+            title=f"{exp_name} | {attr_name} | GT | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
             attr_name=attr_name,
             subject_name="GT",
             cmap=cmap,
@@ -577,7 +560,7 @@ def process_experiment(
             _plot_orthogonal_slices(
                 slices=pred_slice,
                 outpath=pred_path,
-                title=f"{exp_dir.name} | {attr_name} | Expert {expert_idx} | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+                title=f"{exp_name} | {attr_name} | Expert {expert_idx} | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
                 attr_name=attr_name,
                 subject_name=f"Expert {expert_idx}",
                 cmap=cmap,
@@ -595,9 +578,9 @@ def process_experiment(
                 "num_experts": num_experts,
             }
         )
-        logger.info("[%s] Attr %s done = %.3fs", exp_dir.name, attr_name, time.perf_counter() - t_attr)
+        logger.info("[%s] Attr %s done = %.3fs", exp_name, attr_name, time.perf_counter() - t_attr)
 
-    logger.info("[%s] Stage: total = %.3fs", exp_dir.name, time.perf_counter() - t_start)
+    logger.info("[%s] Stage: total = %.3fs", exp_name, time.perf_counter() - t_start)
     return all_outputs
 
 
@@ -606,10 +589,9 @@ def main():
     parser = argparse.ArgumentParser(
         description="Visualize per-expert basis outputs as orthogonal center slices on voxel data (router skipped)."
     )
-    parser.add_argument("--experiments", type=str, default="experiments", help="experiments root directory")
+    parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
+    parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (.pth)")
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
-    parser.add_argument("--exp-id", type=str, default=None, help="single experiment id")
-    parser.add_argument("--epoch", type=int, required=True, help="checkpoint epoch")
     parser.add_argument("--attr", type=str, default=None, help="attr name or comma list; default=all attrs")
     parser.add_argument("--time-index", type=int, default=0, help="time index t")
     parser.add_argument("--channel", type=int, default=0, help="channel index for multi-channel attr")
@@ -634,44 +616,44 @@ def main():
     if clip_percentile is not None and clip_percentile <= 50.0:
         clip_percentile = None
 
-    exp_root = Path(args.experiments)
+    config_path = Path(args.config)
+    checkpoint_path = Path(args.checkpoint)
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
+    if not checkpoint_path.exists():
+        raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
+
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
+    run_timestamp = time.strftime("%Y%m%d_%H%M%S")
 
-    if args.exp_id:
-        exp_dirs = [exp_root / args.exp_id]
-    else:
-        exp_dirs = _collect_experiments(exp_root)
+    try:
+        outputs = process_experiment(
+            config_path=config_path,
+            checkpoint_path=checkpoint_path,
+            outdir=outdir,
+            run_timestamp=run_timestamp,
+            attr_arg=args.attr,
+            time_index=int(args.time_index),
+            channel=int(args.channel),
+            batch_size=int(args.batch_size),
+            device_str=args.device,
+            cmap_arg=args.cmap,
+            clip_percentile=clip_percentile,
+            dpi=int(args.dpi),
+            train_dir_override=args.train_dir,
+        )
+    except Exception as exc:
+        logger.exception("Failed: %s (%s)", config_path, exc)
+        raise
 
-    for exp_dir in exp_dirs:
-        if not exp_dir.exists():
-            continue
-        try:
-            outputs = process_experiment(
-                exp_dir=exp_dir,
-                outdir=outdir,
-                epoch=int(args.epoch),
-                attr_arg=args.attr,
-                time_index=int(args.time_index),
-                channel=int(args.channel),
-                batch_size=int(args.batch_size),
-                device_str=args.device,
-                cmap_arg=args.cmap,
-                clip_percentile=clip_percentile,
-                dpi=int(args.dpi),
-                train_dir_override=args.train_dir,
-            )
-        except Exception as exc:
-            logger.exception("Failed: %s (%s)", exp_dir.name, exc)
-            continue
-
-        logger.info("Finished %s", exp_dir.name)
-        for item in outputs:
-            logger.info("  Attr: %s", item["attr"])
-            logger.info("    GT slice image: %s", item["gt"])
-            logger.info("    Expert images: %s", item["num_experts"])
-            for p in item["experts"]:
-                logger.info("      %s", p)
+    logger.info("Finished %s", config_path)
+    for item in outputs:
+        logger.info("  Attr: %s", item["attr"])
+        logger.info("    GT slice image: %s", item["gt"])
+        logger.info("    Expert images: %s", item["num_experts"])
+        for p in item["experts"]:
+            logger.info("      %s", p)
 
 
 if __name__ == "__main__":
