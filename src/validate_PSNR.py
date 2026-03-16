@@ -138,22 +138,45 @@ def _parse_attrs(arg: str, available: List[str]) -> List[str]:
     return requested
 
 
-def _build_xy_coords_norm(dataset, t_idx: int, z_idx: int) -> np.ndarray:
+def _prepare_xy_base(dataset, device: torch.device):
     X = int(dataset.volume_shape.X)
     Y = int(dataset.volume_shape.Y)
-    x = np.tile(np.arange(X, dtype=np.float32), Y)
-    y = np.repeat(np.arange(Y, dtype=np.float32), X)
-    z = np.full((X * Y,), float(z_idx), dtype=np.float32)
-    t = np.full((X * Y,), float(t_idx), dtype=np.float32)
-    coords = np.stack([x, y, z, t], axis=1)
 
-    mean = dataset.x_mean.reshape(-1).cpu().numpy().astype(np.float32)
-    std = dataset.x_std.reshape(-1).cpu().numpy().astype(np.float32)
-    coords = (coords - mean[None, :]) / std[None, :]
-    return coords.astype(np.float32, copy=False)
+    xs = torch.arange(X, device=device, dtype=torch.float32).repeat(Y)
+    ys = torch.arange(Y, device=device, dtype=torch.float32).repeat_interleave(X)
+
+    mean = dataset.x_mean.reshape(-1).to(device=device, dtype=torch.float32)
+    std = dataset.x_std.reshape(-1).to(device=device, dtype=torch.float32)
+
+    base = torch.empty((X * Y, 4), device=device, dtype=torch.float32)
+    base[:, 0] = (xs - mean[0]) / std[0]
+    base[:, 1] = (ys - mean[1]) / std[1]
+
+    return base, mean, std
 
 
-def _extract_xy_slice(arr: np.ndarray, volume_shape, t_idx: int, z_idx: int) -> np.ndarray:
+def _build_xy_coords_norm_from_base(
+    base_xy: torch.Tensor,
+    x_mean: torch.Tensor,
+    x_std: torch.Tensor,
+    t_idx: int,
+    z_idx: int,
+) -> torch.Tensor:
+    coords = base_xy.clone()
+    coords[:, 2] = (float(z_idx) - x_mean[2]) / x_std[2]
+    coords[:, 3] = (float(t_idx) - x_mean[3]) / x_std[3]
+    return coords
+
+
+def _prepare_xy_index(volume_shape):
+    X = int(volume_shape.X)
+    Y = int(volume_shape.Y)
+    xs = np.tile(np.arange(X, dtype=np.int64), Y)
+    ys = np.repeat(np.arange(Y, dtype=np.int64), X)
+    return xs, ys
+
+
+def _extract_xy_slice(arr: np.ndarray, volume_shape, t_idx: int, z_idx: int, xs=None, ys=None) -> np.ndarray:
     X = int(volume_shape.X)
     Y = int(volume_shape.Y)
     Z = int(volume_shape.Z)
@@ -163,8 +186,10 @@ def _extract_xy_slice(arr: np.ndarray, volume_shape, t_idx: int, z_idx: int) -> 
     if arr.ndim == 4:
         return np.asarray(arr[t_idx, z_idx, :, :], dtype=np.float32)[:, :, None]
 
-    xs = np.tile(np.arange(X, dtype=np.int64), Y)
-    ys = np.repeat(np.arange(Y, dtype=np.int64), X)
+    if xs is None or ys is None:
+        xs = np.tile(np.arange(X, dtype=np.int64), Y)
+        ys = np.repeat(np.arange(Y, dtype=np.int64), X)
+
     idx = ((t_idx * Z + z_idx) * Y + ys) * X + xs
 
     if arr.ndim == 2:
@@ -220,7 +245,7 @@ def _sync_if_needed(device: torch.device):
 
 def _predict_slice(
     model: torch.nn.Module,
-    coords_norm: np.ndarray,
+    coords_norm: torch.Tensor,
     attrs: List[str],
     batch_size: int,
     device: torch.device,
@@ -232,7 +257,7 @@ def _predict_slice(
         n = int(coords_norm.shape[0])
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
-            xb = torch.from_numpy(coords_norm[start:end]).to(device, non_blocking=True)
+            xb = coords_norm[start:end]
             try:
                 out = model(xb, hard_topk=True)
             except TypeError:
@@ -242,11 +267,11 @@ def _predict_slice(
                 for name in attrs:
                     if name not in out:
                         raise KeyError(f"Model output missing attr '{name}'. Available: {list(out.keys())}")
-                    pred_chunks[name].append(out[name].detach())
+                    pred_chunks[name].append(out[name])
             else:
                 if len(attrs) != 1:
                     raise ValueError("Single tensor output cannot be mapped to multiple attrs.")
-                pred_chunks[attrs[0]].append(out.detach())
+                pred_chunks[attrs[0]].append(out)
     _sync_if_needed(device)
     elapsed = time.perf_counter() - t0
 
@@ -348,6 +373,7 @@ def main():
     }
 
     gt_arrays = {name: np.load(str(gt_paths[name]), mmap_mode="r") for name in attrs}
+    xy_xs, xy_ys = _prepare_xy_index(dataset.volume_shape)
 
     timestep_psnr: Dict[str, List[float]] = {name: [] for name in attrs}
 
@@ -360,6 +386,7 @@ def main():
     total_infer_time = 0.0
     global_start = time.perf_counter()
     pbar = _tqdm(total=total_slices, desc="validate_psnr_full", leave=True) if _tqdm is not None else None
+    base_xy, x_mean_t, x_std_t = _prepare_xy_base(dataset, device)
     log_path = Path(args.log)
     _append_timestep_log(
         log_path,
@@ -379,15 +406,15 @@ def main():
             name: {
                 "sse": torch.zeros((), dtype=torch.float64, device=device),
                 "count": 0,
-                "gt_min": float("inf"),
-                "gt_max": float("-inf"),
+                "gt_min": torch.full((), float("inf"), dtype=torch.float32, device=device),
+                "gt_max": torch.full((), float("-inf"), dtype=torch.float32, device=device),
             }
             for name in attrs
         }
         timestep_infer_time = 0.0
 
         for z_idx in range(Z):
-            coords_norm = _build_xy_coords_norm(dataset, t_idx, z_idx)
+            coords_norm = _build_xy_coords_norm_from_base(base_xy, x_mean_t, x_std_t, t_idx, z_idx)
             pred_map, elapsed = _predict_slice(
                 model=model,
                 coords_norm=coords_norm,
@@ -404,7 +431,14 @@ def main():
                 pred_plane = pred_flat.reshape(Y, X, output_dims[name])
                 mean_t, std_t = denorm_stats_torch[name]
                 pred_plane = pred_plane * std_t[None, None, :] + mean_t[None, None, :]
-                gt_plane = _extract_xy_slice(gt_arrays[name], dataset.volume_shape, t_idx, z_idx)
+                gt_plane = _extract_xy_slice(
+                    gt_arrays[name],
+                    dataset.volume_shape,
+                    t_idx,
+                    z_idx,
+                    xs=xy_xs,
+                    ys=xy_ys,
+                )
                 if gt_plane.shape != pred_plane.shape:
                     raise ValueError(
                         f"Shape mismatch for attr '{name}' at t={t_idx}, z={z_idx}: "
@@ -415,14 +449,8 @@ def main():
                 diff = pred_plane - gt_plane_t
                 timestep_stats[name]["sse"] += torch.sum(diff * diff, dtype=torch.float64)
                 timestep_stats[name]["count"] += int(diff.numel())
-                timestep_stats[name]["gt_min"] = min(
-                    timestep_stats[name]["gt_min"],
-                    float(np.min(gt_plane)),
-                )
-                timestep_stats[name]["gt_max"] = max(
-                    timestep_stats[name]["gt_max"],
-                    float(np.max(gt_plane)),
-                )
+                timestep_stats[name]["gt_min"] = torch.minimum(timestep_stats[name]["gt_min"], torch.min(gt_plane_t))
+                timestep_stats[name]["gt_max"] = torch.maximum(timestep_stats[name]["gt_max"], torch.max(gt_plane_t))
 
             if pbar is not None:
                 pbar.update(1)
@@ -433,8 +461,8 @@ def main():
             t_psnr = _compute_psnr_from_accum(
                 sse=float(timestep_stats[name]["sse"].item()),
                 count=int(timestep_stats[name]["count"]),
-                gt_min=float(timestep_stats[name]["gt_min"]),
-                gt_max=float(timestep_stats[name]["gt_max"]),
+                gt_min=float(timestep_stats[name]["gt_min"].item()),
+                gt_max=float(timestep_stats[name]["gt_max"].item()),
             )
             timestep_psnr[name].append(float(t_psnr))
             timestep_vals.append(float(t_psnr))
