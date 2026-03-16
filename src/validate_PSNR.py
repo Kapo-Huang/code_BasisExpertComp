@@ -28,8 +28,8 @@ def _parse_args():
     )
     parser.add_argument("--config", type=str, required=True, help="Path to config yaml.")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to model checkpoint (.pth).")
-    parser.add_argument("--device", type=str, default=None, help="Device: cpu / cuda / cuda:0")
-    parser.add_argument("--batch-size", type=int, default=32768, help="Inference batch size.")
+    parser.add_argument("--device", type=str, default="cuda", help="Device: cpu / cuda / cuda:0")
+    parser.add_argument("--batch-size", type=int, default=16000, help="Inference batch size.")
     parser.add_argument(
         "--attrs",
         type=str,
@@ -41,6 +41,12 @@ def _parse_args():
         type=str,
         default="validate_out/validation_psnr_results.csv",
         help="Path to csv file for results.",
+    )
+    parser.add_argument(
+        "--log",
+        type=str,
+        default="validate_out/validation_psnr_timestep.log",
+        help="Path to .log file for per-timestep PSNR results.",
     )
     return parser.parse_args()
 
@@ -218,11 +224,11 @@ def _predict_slice(
     attrs: List[str],
     batch_size: int,
     device: torch.device,
-) -> tuple[Dict[str, np.ndarray], float]:
+) -> tuple[Dict[str, torch.Tensor], float]:
     pred_chunks: Dict[str, List[torch.Tensor]] = {name: [] for name in attrs}
     _sync_if_needed(device)
     t0 = time.perf_counter()
-    with torch.no_grad():
+    with torch.inference_mode():
         n = int(coords_norm.shape[0])
         for start in range(0, n, batch_size):
             end = min(start + batch_size, n)
@@ -236,21 +242,21 @@ def _predict_slice(
                 for name in attrs:
                     if name not in out:
                         raise KeyError(f"Model output missing attr '{name}'. Available: {list(out.keys())}")
-                    pred_chunks[name].append(out[name].detach().cpu())
+                    pred_chunks[name].append(out[name].detach())
             else:
                 if len(attrs) != 1:
                     raise ValueError("Single tensor output cannot be mapped to multiple attrs.")
-                pred_chunks[attrs[0]].append(out.detach().cpu())
+                pred_chunks[attrs[0]].append(out.detach())
     _sync_if_needed(device)
     elapsed = time.perf_counter() - t0
 
-    out_np = {}
+    out_tensors: Dict[str, torch.Tensor] = {}
     for name in attrs:
-        arr = torch.cat(pred_chunks[name], dim=0).numpy()
+        arr = torch.cat(pred_chunks[name], dim=0)
         if arr.ndim == 1:
             arr = arr[:, None]
-        out_np[name] = np.asarray(arr, dtype=np.float32)
-    return out_np, float(elapsed)
+        out_tensors[name] = arr
+    return out_tensors, float(elapsed)
 
 
 def _infer_output_dims(dataset, attrs: List[str]) -> Dict[str, int]:
@@ -296,6 +302,14 @@ def _append_csv_rows(csv_path: Path, rows: List[Dict]):
             writer.writerow(row)
 
 
+def _append_timestep_log(log_path: Path, lines: List[str], reset: bool = False):
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    mode = "w" if reset else "a"
+    with log_path.open(mode, encoding="utf-8") as f:
+        for line in lines:
+            f.write(f"{line}\n")
+
+
 def main():
     setup_logging()
     args = _parse_args()
@@ -325,17 +339,17 @@ def main():
     payload_dict = payload if isinstance(payload, dict) else {}
     for name in attrs:
         denorm_stats[name] = _resolve_attr_stats(dataset, payload_dict, name, output_dims[name])
+    denorm_stats_torch = {
+        name: (
+            torch.from_numpy(denorm_stats[name][0]).to(device=device, dtype=torch.float32),
+            torch.from_numpy(denorm_stats[name][1]).to(device=device, dtype=torch.float32),
+        )
+        for name in attrs
+    }
 
     gt_arrays = {name: np.load(str(gt_paths[name]), mmap_mode="r") for name in attrs}
 
-    stats = {}
-    for name in attrs:
-        stats[name] = {
-            "sse": 0.0,
-            "count": 0,
-            "gt_min": float("inf"),
-            "gt_max": float("-inf"),
-        }
+    timestep_psnr: Dict[str, List[float]] = {name: [] for name in attrs}
 
     Y = int(dataset.volume_shape.Y)
     X = int(dataset.volume_shape.X)
@@ -346,9 +360,32 @@ def main():
     total_infer_time = 0.0
     global_start = time.perf_counter()
     pbar = _tqdm(total=total_slices, desc="validate_psnr_full", leave=True) if _tqdm is not None else None
+    log_path = Path(args.log)
+    _append_timestep_log(
+        log_path,
+        [
+            f"timestamp={time.strftime('%Y-%m-%d %H:%M:%S')}",
+            f"config_path={Path(args.config).resolve()}",
+            f"checkpoint_path={Path(args.checkpoint).resolve()}",
+            f"attrs={','.join(attrs)}",
+            "--- per-timestep psnr ---",
+        ],
+        reset=True,
+    )
 
     for t_idx in range(T):
         logger.info("Evaluating full timestep %d/%d", t_idx + 1, T)
+        timestep_stats = {
+            name: {
+                "sse": torch.zeros((), dtype=torch.float64, device=device),
+                "count": 0,
+                "gt_min": float("inf"),
+                "gt_max": float("-inf"),
+            }
+            for name in attrs
+        }
+        timestep_infer_time = 0.0
+
         for z_idx in range(Z):
             coords_norm = _build_xy_coords_norm(dataset, t_idx, z_idx)
             pred_map, elapsed = _predict_slice(
@@ -359,13 +396,14 @@ def main():
                 device=device,
             )
             total_infer_time += float(elapsed)
+            timestep_infer_time += float(elapsed)
             total_points += int(coords_norm.shape[0])
 
             for name in attrs:
                 pred_flat = pred_map[name]
                 pred_plane = pred_flat.reshape(Y, X, output_dims[name])
-                mean_arr, std_arr = denorm_stats[name]
-                pred_plane = pred_plane * std_arr[None, None, :] + mean_arr[None, None, :]
+                mean_t, std_t = denorm_stats_torch[name]
+                pred_plane = pred_plane * std_t[None, None, :] + mean_t[None, None, :]
                 gt_plane = _extract_xy_slice(gt_arrays[name], dataset.volume_shape, t_idx, z_idx)
                 if gt_plane.shape != pred_plane.shape:
                     raise ValueError(
@@ -373,14 +411,45 @@ def main():
                         f"gt={gt_plane.shape}, pred={pred_plane.shape}"
                     )
 
-                diff = pred_plane.astype(np.float64) - gt_plane.astype(np.float64)
-                stats[name]["sse"] += float(np.sum(diff * diff, dtype=np.float64))
-                stats[name]["count"] += int(diff.size)
-                stats[name]["gt_min"] = min(stats[name]["gt_min"], float(np.min(gt_plane)))
-                stats[name]["gt_max"] = max(stats[name]["gt_max"], float(np.max(gt_plane)))
+                gt_plane_t = torch.from_numpy(gt_plane).to(device=device, dtype=pred_plane.dtype, non_blocking=True)
+                diff = pred_plane - gt_plane_t
+                timestep_stats[name]["sse"] += torch.sum(diff * diff, dtype=torch.float64)
+                timestep_stats[name]["count"] += int(diff.numel())
+                timestep_stats[name]["gt_min"] = min(
+                    timestep_stats[name]["gt_min"],
+                    float(np.min(gt_plane)),
+                )
+                timestep_stats[name]["gt_max"] = max(
+                    timestep_stats[name]["gt_max"],
+                    float(np.max(gt_plane)),
+                )
 
             if pbar is not None:
                 pbar.update(1)
+
+        timestep_lines = []
+        timestep_vals = []
+        for name in attrs:
+            t_psnr = _compute_psnr_from_accum(
+                sse=float(timestep_stats[name]["sse"].item()),
+                count=int(timestep_stats[name]["count"]),
+                gt_min=float(timestep_stats[name]["gt_min"]),
+                gt_max=float(timestep_stats[name]["gt_max"]),
+            )
+            timestep_psnr[name].append(float(t_psnr))
+            timestep_vals.append(float(t_psnr))
+            timestep_lines.append(
+                f"t={t_idx:04d} attr={name} psnr={float(t_psnr):.6f} "
+                f"inference_time_sec={float(timestep_infer_time):.4f}"
+            )
+
+        if len(timestep_vals) > 1:
+            timestep_lines.append(
+                f"t={t_idx:04d} attr=__mean__ psnr={float(np.mean(timestep_vals)):.6f} "
+                f"inference_time_sec={float(timestep_infer_time):.4f}"
+            )
+
+        _append_timestep_log(log_path, timestep_lines, reset=False)
 
     if pbar is not None:
         pbar.close()
@@ -400,7 +469,7 @@ def main():
     run_ts = time.strftime("%Y-%m-%d %H:%M:%S")
     meta = {
         "timestamp": run_ts,
-        "eval_mode": "full_volume_psnr",
+        "eval_mode": "timestep_avg_psnr",
         "config_path": str(Path(args.config).resolve()),
         "checkpoint_path": str(Path(args.checkpoint).resolve()),
         "exp_id": str(cfg.get("exp_id", "")),
@@ -408,12 +477,8 @@ def main():
         "dataset_name": str(cfg.get("data", {}).get("dataset_name", "")),
     }
     for name in attrs:
-        psnr_val = _compute_psnr_from_accum(
-            sse=float(stats[name]["sse"]),
-            count=int(stats[name]["count"]),
-            gt_min=float(stats[name]["gt_min"]),
-            gt_max=float(stats[name]["gt_max"]),
-        )
+        vals = [v for v in timestep_psnr[name] if np.isfinite(v)]
+        psnr_val = float(np.mean(vals)) if vals else float("nan")
         row = {
             "attr": name,
             "psnr": float(psnr_val),
@@ -425,7 +490,7 @@ def main():
     logger.info("===== Validation Result (PSNR Full Volume) =====")
     for row in rows:
         logger.info(
-            "[%s] PSNR=%.6f | inference_time=%.4fs",
+            "[%s] avg_timestep_PSNR=%.6f | inference_time=%.4fs",
             row["attr"],
             row["psnr"],
             row["inference_time_sec"],
@@ -449,6 +514,7 @@ def main():
     csv_path = Path(args.csv)
     _append_csv_rows(csv_path, rows)
     logger.info("Saved PSNR validation results to CSV: %s", csv_path)
+    logger.info("Saved per-timestep PSNR log to: %s", log_path)
 
 
 if __name__ == "__main__":

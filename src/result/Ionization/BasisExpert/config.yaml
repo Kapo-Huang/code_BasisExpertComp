@@ -1,0 +1,83 @@
+experiment: exp_data_ionization_light_basis_expert
+exp_id: light_basis_expert-ionization
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_multi.npz
+  compute_target_stats: true
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 100
+  target_dir: ./data/raw/ionization/train
+  normalize: true
+model:
+  name: light_basis_expert
+  in_features: 4
+  num_experts: 6
+  base_dim: 24
+  top_k: 3
+  expert_num_frequencies: 6
+  expert_num_layers: 3
+  gate_num_layers: 3
+  decoder_num_layers: 3
+  head_num_layers: 2
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  gate_first_omega_0: 30.0
+  gate_hidden_omega_0: 30.0
+  decoder_first_omega_0: 30.0
+  decoder_hidden_omega_0: 30.0
+  head_first_omega_0: 30.0
+  head_hidden_omega_0: 30.0
+training:
+  epochs: 600
+  batch_size: 16000
+  pred_batch_size: 16000
+  batches_per_epoch_budget: 1500
+  lr: 5.0e-05
+  lr_decay_rate: 0.92
+  lr_decay_step: 40
+  log_every: 10
+  log_psnr_every: 50
+  psnr_sample_ratio: 0.1
+  save_every: 300
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  gradient_diag:
+    enabled: false
+    every_n_steps: 750
+    max_layers_to_log: 10
+  gradient_balancer:
+    enabled: true
+    method: gradnorm
+    gradnorm_alpha: 0.5
+    gradnorm_lr: 0.001
+    gradnorm_every_n_steps: 750
+    cagrad_c: 0.4
+    solver_max_iter: 30
+    solver_lr: 0.25
+  pretrain:
+    enabled: true
+    mode: router_classification
+    epochs: 5
+    lr: 5.0e-05
+    batch_size: 16000
+    assignments_method: voxel_clustering
+    cluster_num_time_samples: 6
+    cluster_seed: 42
+    assignments_cache_path: ./data/cache/voxel_assignments_6.npy
+    spatial_blocks:
+      - 4
+      - 4
+      - 4
+    time_block_size: 1
+  timestep_curriculum:
+    enabled: false
+    mode: stride
+    stride_groups: 10
+    epochs_per_group: 8

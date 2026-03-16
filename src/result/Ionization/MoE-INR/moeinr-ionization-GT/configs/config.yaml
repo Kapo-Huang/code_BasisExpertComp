@@ -1,0 +1,69 @@
+data:
+  compute_target_stats: true
+  data_root: ./data
+  dataset_name: ionization
+  split: train
+  target_path: ./data/raw/ionization/train/target_GT.npy
+  target_stats_path: ./data/raw/ionization/train/target_stats_GT.npz
+  volume_shape:
+    T: 100
+    X: 600
+    Y: 248
+    Z: 248
+exp_id: moeinr-ionization-GT
+experiment: exp_data_ionization_GT
+experiment_root: experiments
+model:
+  base_dim: 50
+  encoder_first_omega_0: 30.0
+  encoder_hidden_omega_0: 30.0
+  expert_first_omega_0: 30.0
+  expert_hidden_omega_0: 30.0
+  expert_num_layers: 2
+  in_features: 4
+  name: moe_inr
+  num_experts: 7
+  out_features: 1
+  policy_first_omega_0: 30.0
+  policy_hidden_omega_0: 30.0
+  policy_num_layers: 3
+training:
+  batch_size: 16000
+  batches_per_epoch_budget: 1500
+  div_sigma: 1.0
+  early_stop_patience: 0
+  epochs: 600
+  gam_div: 0
+  gam_orth: 0
+  lam_eq: 0
+  log_every: 1
+  log_psnr_every: 100
+  loss_type: mse
+  lr: 5.0e-05
+  lr_decay_rate: 0.92
+  lr_decay_step: 40
+  num_workers: 2
+  pred_batch_size: 16000
+  pretrain:
+    assignments_cache_path: ./data/cache/voxel_assignments.npy
+    assignments_method: voxel_clustering
+    batch_size: 16000
+    cluster_num_time_samples: 7
+    cluster_seed: 42
+    enabled: true
+    epochs: 10
+    lr: 5.0e-05
+    mode: router_classification
+    spatial_blocks:
+    - 4
+    - 4
+    - 4
+    time_block_size: 1
+  psnr_sample_ratio: 0.1
+  save_every: 600
+  seed: 42
+  timestep_curriculum:
+    enabled: false
+    epochs_per_group: 6
+    mode: stride
+    stride_groups: 5

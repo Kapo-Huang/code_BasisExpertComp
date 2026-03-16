@@ -347,33 +347,6 @@ def _merge_grads_mgda(G: torch.Tensor, max_iter: int, lr: float) -> Tuple[torch.
     merged_grad = alpha @ G
     return merged_grad, alpha
 
-
-# def _solve_cagrad_weights(G: torch.Tensor, c: float, max_iter: int, lr: float) -> torch.Tensor:
-#     if G.ndim != 2:
-#         raise ValueError("G must have shape (T, P)")
-#     T = int(G.shape[0])
-#     w = torch.full((T,), 1.0 / float(T), device=G.device, dtype=G.dtype)
-#     g0 = torch.mean(G, dim=0)
-#     for _ in range(int(max_iter)):
-#         gw = w @ G
-#         gw_norm = torch.norm(gw) + 1e-12
-#         grad = (G @ g0) + float(c) * ((G @ gw) / gw_norm)
-#         w = _project_to_simplex(w - float(lr) * grad)
-#     return w
-
-
-# def _merge_grads_cagrad(
-#     G: torch.Tensor,
-#     c: float,
-#     max_iter: int,
-#     lr: float,
-# ) -> Tuple[torch.Tensor, torch.Tensor]:
-#     w = _solve_cagrad_weights(G, c=c, max_iter=max_iter, lr=lr)
-#     g0 = torch.mean(G, dim=0)
-#     gw = w @ G
-#     merged_grad = g0 + float(c) * gw / (torch.norm(gw) + 1e-12)
-#     return merged_grad, w
-
 def _solve_cagrad_weights(
     G: torch.Tensor,
     c: float,
