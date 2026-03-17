@@ -13,6 +13,8 @@ p = argparse.ArgumentParser()
 p.add_argument('--logging_root', type=str, default='./logs', help='root for logging')
 p.add_argument('--no-cuda', action='store_true', default=False,
                     help='disables CUDA training')
+p.add_argument('--device', type=str, default='cuda',
+                    help='device to run on: cpu / cuda / cuda:0')
 # General training options
 p.add_argument('--data_type',type=str,default='s')
 p.add_argument('--batch_size', type=int, default=16000)
@@ -54,7 +56,13 @@ p.add_argument('--angle', type=int, default=15, metavar='N',
                     help='sampled angle')
 
 opt = p.parse_args()
-opt.cuda = not opt.no_cuda and torch.cuda.is_available()
+if opt.device.lower() == 'cpu' or opt.no_cuda:
+  opt.cuda = False
+  opt.device = 'cpu'
+else:
+  opt.cuda = torch.cuda.is_available()
+  if not opt.cuda:
+    opt.device = 'cpu'
 
 
 def _print_model_size(model):
@@ -81,7 +89,7 @@ def main():
       Model = CoordNet(4,1,opt.init,opt.num_res)
     _print_model_size(Model)
     Data.ReadData()
-    Model.cuda()
+    Model = Model.to(opt.device)
     trainNet(Model,opt,Data)
 
   elif opt.train == 'inf':

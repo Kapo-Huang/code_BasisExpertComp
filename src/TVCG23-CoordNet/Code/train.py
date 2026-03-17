@@ -51,6 +51,7 @@ def _epoch_sample_points(dataset, args):
     return len(dataset.samples) * args.factor * args.batch_size
 
 def trainNet(model,args,dataset):
+    device = torch.device(getattr(args, 'device', 'cuda' if torch.cuda.is_available() else 'cpu'))
     if args.application == 'spatial' or args.application == 'super-spatial':
         loss = open(args.model_path+args.dataset+'/'+'loss-'+args.application+'-'+str(args.scale)+'-'+str(args.init)+'-'+str(args.factor)+'.txt','w')
     elif args.application == 'temporal':
@@ -77,9 +78,8 @@ def trainNet(model,args,dataset):
         
         for batch_idx, (coord,v) in enumerate(train_loader):
             t1 = time.time()
-            if args.cuda:
-                coord = coord.cuda()
-                v = v.cuda()
+            coord = coord.to(device)
+            v = v.to(device)
             optimizer.zero_grad()
             v_pred = model(coord)
             mse = criterion(v_pred.view(-1),v.view(-1))
@@ -115,6 +115,7 @@ def adjust_lr(args, optimizer, epoch):
 
 
 def inf(dataset,args):
+    device = torch.device(getattr(args, 'device', 'cuda' if torch.cuda.is_available() else 'cpu'))
 
     if args.application != 'viewsynthesis':
         if args.active == 'sine':
@@ -133,7 +134,7 @@ def inf(dataset,args):
     '''
     if args.application == 'viewsynthesis':
         model = torch.load(args.model_path+args.dataset+'/'+args.application+'-'+str(args.res)+'-'+str(args.angle)+'-'+str(args.num_epochs)+'.pth')
-    model.cuda()
+    model = model.to(device)
 
     if args.application in ['spatial','temporal']:
         idx = 0
@@ -148,7 +149,7 @@ def inf(dataset,args):
                     train_loader = DataLoader(dataset=torch.FloatTensor(d), batch_size=args.batch_size, shuffle=False)
                     v = []
                     for batch_idx, coord in enumerate(train_loader):
-                        coord = coord.cuda()
+                        coord = coord.to(device)
                         with torch.no_grad():
                             v_pred = model(coord)
                             v += list(v_pred.view(-1).detach().cpu().numpy())
@@ -169,7 +170,7 @@ def inf(dataset,args):
                 train_loader = DataLoader(dataset=torch.FloatTensor(np.concatenate((coords[:, [2,1,0]], time),axis=1)), batch_size=args.batch_size, shuffle=False)
                 v = []
                 for batch_idx, coord in enumerate(train_loader):
-                    coord = coord.cuda()
+                    coord = coord.to(device)
                     with torch.no_grad():
                         v_pred = model(coord)
                         v += list(v_pred.view(-1).detach().cpu().numpy())
@@ -195,7 +196,7 @@ def inf(dataset,args):
             train_loader = DataLoader(dataset=torch.FloatTensor(np.concatenate((coords[:, [2,1,0]], time),axis=1)), batch_size=args.batch_size, shuffle=False)
             v = []
             for batch_idx, coord in enumerate(train_loader):
-                coord = coord.cuda()
+                coord = coord.to(device)
                 with torch.no_grad():
                     v_pred = model(coord)
                     v += list(v_pred.view(-1).detach().cpu().numpy())
@@ -220,7 +221,7 @@ def inf(dataset,args):
             train_loader = DataLoader(dataset=torch.FloatTensor(np.concatenate((pixel_coords, time),axis=1)), batch_size=args.batch_size, shuffle=False)
             v = []
             for batch_idx, coord in enumerate(train_loader):
-                coord = coord.cuda()
+                coord = coord.to(device)
                 with torch.no_grad():
                     v_pred = model(coord)
                     v += list(v_pred.view(-1).detach().cpu().numpy())
@@ -249,7 +250,7 @@ def inf(dataset,args):
                 b = []
                 temp = time.time()
                 for batch_idx, coord in enumerate(train_loader):
-                    coord = coord.cuda()
+                    coord = coord.to(device)
                     with torch.no_grad():
                         v_pred = model(coord).permute(1,0)
                         r += list(v_pred[0].view(-1).detach().cpu().numpy())
@@ -286,7 +287,7 @@ def inf(dataset,args):
             train_loader = DataLoader(dataset=torch.FloatTensor(np.concatenate((coords[:, [2,1,0]], time),axis=1)), batch_size=args.batch_size, shuffle=False)
             v = []
             for batch_idx, coord in enumerate(train_loader):
-                coord = coord.cuda()
+                coord = coord.to(device)
                 with torch.no_grad():
                     v_pred = model(coord)
                     v += list(v_pred.view(-1).detach().cpu().numpy())
