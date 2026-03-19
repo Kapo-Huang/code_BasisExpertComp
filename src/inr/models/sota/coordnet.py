@@ -1,11 +1,11 @@
-import math
+import numpy as np
 import torch
 from torch import nn
 
 
 class Sine(nn.Module):
     def __init__(self):
-        super().__init__()
+        super(Sine, self).__init__()
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         return torch.sin(30 * input)
@@ -32,7 +32,7 @@ class SineLayer(nn.Module):
             if self.is_first:
                 bound = 1.0 / self.in_features
             else:
-                bound = math.sqrt(6.0 / self.in_features) / self.omega_0
+                bound = np.sqrt(6.0 / self.in_features) / self.omega_0
             self.linear.weight.uniform_(-bound, bound)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
@@ -56,8 +56,8 @@ class LinearLayer(nn.Module):
 
 
 class ResBlock(nn.Module):
-    def __init__(self, in_features: int, out_features: int, nonlinearity: str = "relu", is_first: bool = False):
-        super().__init__()
+    def __init__(self, in_features: int, out_features: int, nonlinearity: str = "relu"):
+        super(ResBlock, self).__init__()
         nls_and_inits = {
             "sine": Sine(),
             "relu": nn.ReLU(inplace=True),
@@ -70,7 +70,7 @@ class ResBlock(nn.Module):
 
         self.nl = nls_and_inits[nonlinearity]
         self.net = []
-        self.net.append(SineLayer(in_features, out_features, is_first=is_first))
+        self.net.append(SineLayer(in_features, out_features))
         self.net.append(SineLayer(out_features, out_features))
         self.flag = in_features != out_features
         if self.flag:
@@ -86,10 +86,10 @@ class ResBlock(nn.Module):
 
 class CoordNet(nn.Module):
     def __init__(self, in_features: int, out_features: int, init_features: int = 64, num_res: int = 10):
-        super().__init__()
+        super(CoordNet, self).__init__()
         self.num_res = num_res
         self.net = []
-        self.net.append(ResBlock(in_features, init_features, is_first=True))
+        self.net.append(ResBlock(in_features, init_features))
         self.net.append(ResBlock(init_features, 2 * init_features))
         self.net.append(ResBlock(2 * init_features, 4 * init_features))
         for _ in range(self.num_res):
@@ -103,7 +103,7 @@ class CoordNet(nn.Module):
 
 class ResBlockReLU(nn.Module):
     def __init__(self, in_features: int, out_features: int):
-        super().__init__()
+        super(ResBlockReLU, self).__init__()
         self.net = []
         self.net.append(LinearLayer(in_features, out_features))
         self.net.append(nn.ReLU(inplace=True))
@@ -126,7 +126,7 @@ class ResBlockReLU(nn.Module):
 
 class CoordNetReLU(nn.Module):
     def __init__(self, in_features: int, out_features: int, init_features: int = 64, num_res: int = 10):
-        super().__init__()
+        super(CoordNetReLU, self).__init__()
         self.num_res = num_res
         self.net = []
         self.net.append(ResBlockReLU(in_features, init_features))

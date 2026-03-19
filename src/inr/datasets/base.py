@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Dict, Optional, Tuple, Union
+from typing import Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -19,66 +19,62 @@ class VolumeShape:
         return int(self.X) * int(self.Y) * int(self.Z) * int(self.T)
 
 
+def to_torch_copy(x: Union[np.ndarray, list, tuple]) -> torch.Tensor:
+    arr = np.asarray(x, dtype=np.float32)
+    return torch.from_numpy(np.ascontiguousarray(arr))
+
+
 def peek_array(path: str) -> np.ndarray:
     return np.load(path, mmap_mode="r")
 
 
-def to_torch_copy(arr: np.ndarray) -> torch.Tensor:
-    return torch.from_numpy(np.array(arr, dtype=np.float32, copy=True))
-
-
-def parse_volume_shape(
-    volume_shape: Optional[Union[VolumeShape, Tuple[int, int, int, int], Dict[str, int]]]
-) -> Optional[VolumeShape]:
-    if volume_shape is None:
-        return None
-    if isinstance(volume_shape, VolumeShape):
-        return volume_shape
-    if isinstance(volume_shape, dict):
-        return VolumeShape(
-            X=int(volume_shape["X"]),
-            Y=int(volume_shape["Y"]),
-            Z=int(volume_shape["Z"]),
-            T=int(volume_shape["T"]),
-        )
-    if isinstance(volume_shape, (tuple, list)) and len(volume_shape) == 4:
-        return VolumeShape(*map(int, volume_shape))
-    raise ValueError("volume_shape must be VolumeShape, dict with X/Y/Z/T, or a 4-tuple/list.")
+def target_dim_from_array(arr: np.ndarray) -> int:
+    if arr.ndim in (5, 2):
+        return int(arr.shape[-1])
+    if arr.ndim in (4, 1):
+        return 1
+    raise ValueError(f"Unsupported target ndim: {arr.ndim} with shape {arr.shape}")
 
 
 def infer_or_validate_volume_shape(
-    y_np: np.ndarray,
-    volume_shape: Optional[Union[VolumeShape, Tuple[int, int, int, int], Dict[str, int]]],
+    arr: np.ndarray,
+    volume_shape: Optional[Union[VolumeShape, dict]],
 ) -> VolumeShape:
-    volume_shape = parse_volume_shape(volume_shape)
-    if y_np.ndim in (4, 5):
-        T, Z, Y, X = map(int, y_np.shape[:4])
-        inferred = VolumeShape(X=X, Y=Y, Z=Z, T=T)
-        if volume_shape is not None and volume_shape != inferred:
-            raise ValueError(f"volume_shape mismatch: provided={volume_shape} inferred={inferred}")
-        return inferred
+    if volume_shape is not None:
+        if isinstance(volume_shape, VolumeShape):
+            s = volume_shape
+        else:
+            s = VolumeShape(
+                X=int(volume_shape["X"]),
+                Y=int(volume_shape["Y"]),
+                Z=int(volume_shape["Z"]),
+                T=int(volume_shape["T"]),
+            )
 
-    if volume_shape is None:
-        raise ValueError("For flattened targets (1D/2D), you must provide volume_shape=(X,Y,Z,T).")
+        if arr.ndim in (4, 5):
+            expected = (int(s.T), int(s.Z), int(s.Y), int(s.X))
+            got = tuple(int(v) for v in arr.shape[:4])
+            if got != expected:
+                raise ValueError(f"Volume shape mismatch: array={got}, expected={expected}")
+        elif arr.ndim in (1, 2):
+            if int(arr.shape[0]) != int(s.N):
+                raise ValueError(f"Flat target size mismatch: array N={arr.shape[0]}, expected N={s.N}")
+        else:
+            raise ValueError(f"Unsupported target ndim: {arr.ndim} with shape {arr.shape}")
+        return s
 
-    N = volume_shape.N
-    if y_np.ndim == 2 and int(y_np.shape[0]) != N:
-        raise ValueError(f"Flattened y first dim must be N={N}, got {y_np.shape[0]}")
-    if y_np.ndim == 1 and int(y_np.shape[0]) != N:
-        raise ValueError(f"Flattened y length must be N={N}, got {y_np.shape[0]}")
-    return volume_shape
+    if arr.ndim not in (4, 5):
+        raise ValueError(
+            "volume_shape must be provided for flat targets with ndim 1/2; "
+            f"got ndim={arr.ndim}, shape={arr.shape}"
+        )
 
-
-def target_dim_from_array(y: np.ndarray) -> int:
-    if y.ndim == 5:
-        return int(y.shape[-1])
-    if y.ndim == 4:
-        return 1
-    if y.ndim == 2:
-        return int(y.shape[1])
-    if y.ndim == 1:
-        return 1
-    raise ValueError(f"Unsupported target ndim: {y.ndim} with shape {y.shape}")
+    return VolumeShape(
+        X=int(arr.shape[3]),
+        Y=int(arr.shape[2]),
+        Z=int(arr.shape[1]),
+        T=int(arr.shape[0]),
+    )
 
 
 def idx_to_xyzt(idx: int, s: VolumeShape) -> Tuple[int, int, int, int]:
@@ -151,7 +147,6 @@ def compute_target_stats_streaming(
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     C = target_dim_from_array(y)
 
-    # flatten 视图（尽量不复制）
     if y.ndim == 5:
         flat = y.reshape(-1, y.shape[-1])
     elif y.ndim == 4:
@@ -165,13 +160,11 @@ def compute_target_stats_streaming(
 
     N = int(flat.shape[0])
     count = 0
-    s1 = np.zeros((C,), dtype=dtype)   # sum
-    s2 = np.zeros((C,), dtype=dtype)   # sumsq
+    s1 = np.zeros((C,), dtype=dtype)
+    s2 = np.zeros((C,), dtype=dtype)
 
     for start in range(0, N, chunk_voxels):
         end = min(start + chunk_voxels, N)
-
-        # 这里会把 dtype 转成 float64（通常需要一次拷贝），但没有逐元素 Python 循环了
         block = np.asarray(flat[start:end], dtype=dtype)
 
         count_b = block.shape[0]
@@ -184,7 +177,6 @@ def compute_target_stats_streaming(
         var = np.zeros_like(mean)
     else:
         mean = s1 / count
-        # 无偏方差（ddof=1）
         var = (s2 - (s1 * s1) / count) / (count - 1)
         var = np.maximum(var, 0.0)
 

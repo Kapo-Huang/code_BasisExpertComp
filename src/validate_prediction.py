@@ -2,6 +2,7 @@ import argparse
 import importlib
 import logging
 import sys
+import time
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -31,9 +32,15 @@ def _parse_args():
         default=None,
         help="Single timestep to export. If omitted, export all timesteps.",
     )
+    parser.add_argument(
+        "--timestamps",
+        type=str,
+        default="",
+        help="Comma-separated timesteps to export, e.g. '20,50,70,90'.",
+    )
     parser.add_argument("--attr", type=str, default="", help="Target attr name for multi-target models.")
     parser.add_argument("--device", type=str, default="cuda", help="Device: cpu / cuda / cuda:0")
-    parser.add_argument("--batch-size", type=int, default=32768, help="Inference batch size.")
+    parser.add_argument("--batch-size", type=int, default=16000, help="Inference batch size.")
     parser.add_argument(
         "--outdir",
         type=str,
@@ -178,9 +185,27 @@ def _sync_if_needed(device: torch.device):
         torch.cuda.synchronize(device)
 
 
-def _select_timesteps(timestamp: Optional[int], T: int) -> List[int]:
+def _select_timesteps(timestamp: Optional[int], timestamps: str, T: int) -> List[int]:
     if T <= 0:
         raise ValueError("Invalid volume shape: T<=0")
+
+    if timestamps and timestamps.strip():
+        selected = []
+        seen = set()
+        for token in timestamps.split(","):
+            token = token.strip()
+            if not token:
+                continue
+            t = int(token)
+            if t < 0 or t >= T:
+                raise ValueError(f"timestamp out of range: {t}, valid [0, {T - 1}]")
+            if t not in seen:
+                seen.add(t)
+                selected.append(t)
+        if not selected:
+            raise ValueError("--timestamps was provided but no valid timestep was parsed")
+        return selected
+
     if timestamp is None:
         return list(range(T))
     t = int(timestamp)
@@ -199,7 +224,7 @@ def _predict_timestep_flat_scalar(
     denorm_mean: torch.Tensor,
     denorm_std: torch.Tensor,
     device: torch.device,
-) -> np.ndarray:
+) -> Tuple[np.ndarray, float]:
     X = int(dataset.volume_shape.X)
     Y = int(dataset.volume_shape.Y)
     Z = int(dataset.volume_shape.Z)
@@ -207,11 +232,16 @@ def _predict_timestep_flat_scalar(
 
     x_mean = dataset.x_mean.reshape(-1).to(device=device, dtype=torch.float32)
     x_std = dataset.x_std.reshape(-1).to(device=device, dtype=torch.float32)
+    denorm_mean = denorm_mean.to(device=device, dtype=torch.float32)
+    denorm_std = denorm_std.to(device=device, dtype=torch.float32)
 
     out_flat = np.empty((V,), dtype=np.float32)
 
     model.eval()
     _sync_if_needed(device)
+    
+    infer_start = time.time()
+    
     with torch.inference_mode():
         for start in range(0, V, int(batch_size)):
             end = min(start + int(batch_size), V)
@@ -256,7 +286,9 @@ def _predict_timestep_flat_scalar(
             out_flat[start:end] = scalar.detach().cpu().numpy().astype(np.float32, copy=False)
 
     _sync_if_needed(device)
-    return out_flat
+    infer_time = time.time() - infer_start
+    
+    return out_flat, infer_time
 
 
 def _build_output_path(outdir: Path, prefix: str, attr_name: str, t_idx: int) -> Path:
@@ -291,34 +323,40 @@ def main():
     else:
         out_dim = int(getattr(dataset, "_target_dim", 1))
 
-    payload_dict = payload if isinstance(payload, dict) else {}
-    mean_arr, std_arr = _resolve_attr_stats(dataset, payload_dict, attr_name, out_dim)
-    denorm_mean = torch.from_numpy(mean_arr).to(device=device, dtype=torch.float32)
-    denorm_std = torch.from_numpy(std_arr).to(device=device, dtype=torch.float32)
-
     T = int(dataset.volume_shape.T)
-    timesteps = _select_timesteps(args.timestamp, T)
+    timesteps = _select_timesteps(args.timestamp, args.timestamps, T)
 
     outdir = Path(args.outdir)
     outdir.mkdir(parents=True, exist_ok=True)
     pbar = _tqdm(total=len(timesteps), desc="predict_export", leave=True) if _tqdm is not None else None
 
+    total_infer_time = 0.0
+    
     for t_idx in timesteps:
-        pred_flat = _predict_timestep_flat_scalar(
+        # 直接推理，无需反标准化
+        pred_flat, infer_time = _predict_timestep_flat_scalar(
             model=model,
             dataset=dataset,
             attr_name=attr_name,
             out_dim=out_dim,
             t_idx=int(t_idx),
             batch_size=int(args.batch_size),
-            denorm_mean=denorm_mean,
-            denorm_std=denorm_std,
+            denorm_mean=torch.zeros(out_dim, device=device),  # 不做反标准化
+            denorm_std=torch.ones(out_dim, device=device),    # 不做反标准化
             device=device,
         )
+        
+        total_infer_time += infer_time
 
         out_path = _build_output_path(outdir, str(args.prefix), attr_name, int(t_idx))
         np.save(str(out_path), pred_flat)
-        logger.info("Saved timestep=%d shape=%s to %s", int(t_idx), tuple(pred_flat.shape), out_path)
+        logger.info(
+            "Saved timestep=%d shape=%s to %s (inference time: %.3f s)",
+            int(t_idx),
+            tuple(pred_flat.shape),
+            out_path,
+            infer_time,
+        )
 
         if pbar is not None:
             pbar.update(1)
@@ -326,11 +364,14 @@ def main():
     if pbar is not None:
         pbar.close()
 
+    avg_infer_time = total_infer_time / len(timesteps) if timesteps else 0
     logger.info(
-        "Prediction export finished. timesteps=%d attr=%s outdir=%s",
+        "Prediction export finished. timesteps=%d attr=%s outdir=%s total_inference_time=%.3f s avg_inference_time=%.3f s",
         len(timesteps),
         attr_name,
         outdir,
+        total_infer_time,
+        avg_infer_time,
     )
 
 
