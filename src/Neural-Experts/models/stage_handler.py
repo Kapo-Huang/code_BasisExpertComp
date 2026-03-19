@@ -4,9 +4,6 @@
 
 from itertools import zip_longest, tee
 from collections import defaultdict
-from .sdf_losses import SDFShapeLoss
-from .rgb_losses import RGBImageLoss
-from .audio_losses import AudioLoss
 from .ionization_losses import IonizationLoss
 import torch.optim.lr_scheduler as lr_scheduler
 
@@ -33,15 +30,14 @@ class TrainingStageHandler():
             self.current_stage = self.stages_list[self.current_stage_idx]
 
         self.default_criterion_type = cfg['LOSS']['loss_type']
-        if 'rgb' in cfg['MODEL']['model_name']:
-            self.default_criterion = RGBImageLoss(cfg=cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                                  model=self.model, n_experts=cfg['MODEL']['n_experts'])
-        elif 'ionization' in cfg['MODEL']['model_name']:
-            self.default_criterion = IonizationLoss(cfg=cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                                    model=self.model, n_experts=cfg['MODEL']['n_experts'])
-        else:
-            self.default_criterion = SDFShapeLoss(cfg=cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                              model=self.model, n_experts=cfg['MODEL']['n_experts'])
+        if 'ionization' not in cfg['MODEL']['model_name']:
+            raise ValueError("TrainingStageHandler only supports ionization models.")
+        self.default_criterion = IonizationLoss(
+            cfg=cfg['LOSS'],
+            model_name=self.cfg['MODEL']['model_name'],
+            model=self.model,
+            n_experts=cfg['MODEL']['n_experts'],
+        )
         self.get_criterion()
         self.cfg = cfg
 
@@ -105,18 +101,14 @@ class TrainingStageHandler():
         # get the criterion for the current stage
         self.cfg['LOSS']['loss_type'] = self.current_stage['loss_type']
         if 'loss_type' in self.current_stage.keys():
-            if 'rgb' in self.cfg['MODEL']['model_name']:
-                self.criterion = RGBImageLoss(cfg=self.cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                            model=self.model, n_experts=self.cfg['MODEL']['n_experts'])
-            elif 'audio' in self.cfg['MODEL']['model_name']:
-                self.criterion = AudioLoss(cfg=self.cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                            model=self.model, n_experts=self.cfg['MODEL']['n_experts'])
-            elif 'ionization' in self.cfg['MODEL']['model_name']:
-                self.criterion = IonizationLoss(cfg=self.cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                                model=self.model, n_experts=self.cfg['MODEL']['n_experts'])
-            else:
-                self.criterion = SDFShapeLoss(cfg=self.cfg['LOSS'], model_name=self.cfg['MODEL']['model_name'],
-                                            model=self.model, n_experts=self.cfg['MODEL']['n_experts'])
+            if 'ionization' not in self.cfg['MODEL']['model_name']:
+                raise ValueError("TrainingStageHandler only supports ionization models.")
+            self.criterion = IonizationLoss(
+                cfg=self.cfg['LOSS'],
+                model_name=self.cfg['MODEL']['model_name'],
+                model=self.model,
+                n_experts=self.cfg['MODEL']['n_experts'],
+            )
 
         else:
             self.cfg['LOSS']['loss_type'] = self.default_criterion_type
@@ -191,7 +183,7 @@ if __name__ == '__main__':
             self.decoder = torch.nn.Linear(3, 3)
             self.manager_net = torch.nn.Linear(3, 3)
 
-    cfg = yaml.safe_load(open('../configs/config_2D.yaml'))
+    cfg = yaml.safe_load(open('../configs/ionization/config_ionization_Hplus.yaml'))
     model = Model()
     stage_handler = TrainingStageHandler(cfg['TRAINING']['stages'], model, cfg)
 

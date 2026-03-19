@@ -1,107 +1,47 @@
-***Neural Experts***: Mixture of Experts for Implicit Neural Representations (NeurIPS 2024)
----
-Created by [Yizhak Ben-Shabat (Itzik)](http://www.itzikbs.com)*, [Chamin Hewa Koneputugodage]( https://www.linkedin.com/in/chamin-hewa-koneputugodage-b3ba17148/)*, [Sameera Ramasinghe](https://www.linkedin.com/in/sameeraramasinghe/) and [Stephen Gould](http://users.cecs.anu.edu.au/~sgould/) from [ANU](https://www.anu.edu.au/).
+# Neural-Experts Ionization
 
-__[Project page](https://sitzikbs.github.io/neural-experts-projectpage/)&nbsp;/ [Arxiv](https://arxiv.org/abs/2410.21643)&nbsp;/ [Video](https://youtu.be/mmxTBAZYYys)__
+This directory has been reduced to a single task: 4D ionization INR training with the Neural-Experts MoE architecture.
 
-<div align="center">
-  <a href="https://www.itzikbs.com/" target="blank">
-    <img src="assets/YizhakBenShabat.jpg" alt="Yizhak Ben-Shabat (Itzik)" style="height:100px;">
-  </a>
-  <a href="https://www.linkedin.com/in/chamin-hewa-koneputugodage-b3ba17148/" target="blank">
-    <img src="assets/ChaminHewa.jpg" alt="Chamin Hewa Koneputugodage" style="height:100px;">
-  </a>
-  <a href="https://www.linkedin.com/in/sameeraramasinghe/" target="blank">
-    <img src="assets/sameera_ramasinghe.jpg" alt="Sameera Ramasinghe" style="height:100px;">
-  </a>
-  <a href="https://cecs.anu.edu.au/people/stephen-gould/" target="blank">
-    <img src="assets/StephenGould.jpg" alt="Stephen Gould" style="height:100px;">
-  </a>
-</div>
-* Equal contribution
+Supported attributes:
 
-![Neural Experts intuition](assets/Neural_Experts_teaser.png)
+- `GT`
+- `H+`
+- `H2`
+- `He`
+- `PD`
 
-## Introduction
-This is the code for training and evaluating Neural Experts for various implicit neural representations including images, audio, and SDFs representing 3D surfaces.
-The repo is very versatile and allows to easily select different architecture configurations, training parameters, and datasets through the `config.yaml` files.
+Each run trains one attribute at a time with input `(x, y, z, t)` and output `v`.
 
-Please follow the installation instructions below.
+## Entry Points
 
-## Instructions
+Manager pretraining:
 
-### 1. Requirements
-
-The code was tested with Python 3.8.19, torch 2.1.2, CUDA 11.8 on Ubuntu 22.04. 
-Note that our experiments show that different environments can affect the results.
-
-For a full list of requirements see [`requirement.txt`](requirements.txt). 
-
-Example installation code (should install PyTorch separately):
-```sh
-conda create -n inr_moe python=3.8.19
-conda activate inr_moe
-conda install pip
-pip install torch==2.1.2 torchvision==0.16.2 torchaudio==2.1.2 --index-url https://download.pytorch.org/whl/cu118
-pip install -r requirements.txt
+```powershell
+python Neural-Experts\ionization\train_ionization.py --config Neural-Experts\configs\ionization\config_ionization_Hplus_managerpretraining.yaml --identifier hplus_managerpretrain --logdir experiments\neural_experts --gpu 0
 ```
 
-### 2. Data and logging
-We recommend placing the data you want to encode in the `data` directory however, this is not strictly required, as long as you make sure that the config file points to the correct `dataset_path` (under `DATA`).
-The specific file if is given as a parameter for the relative path from the `data` directory for the train and test script.
+Main training:
 
-For RGB images, we provide a script to save images from `skimage` locally in the `data` directory for rapid experimentation.
-If you want to reproduce the resutls in the paper, you will need to download the [KODIM](https://r0k.us/graphics/kodak/) dataset.
-
-
-###  3. Train and Testing on audio signals
-Run the following script to train and test on audio signals:
-```sh
-cd audio
-./run_train_test_audio.sh
-```
-This will train a neural representation for audio signals and evaluate the reconstruction error. 
-The script uses the configuration file `./configs/audio_config.yaml` which can be modified to change the training parameters.
-
-
-### 4. Train and test on images
-Run the following script to train and test on RGB images:
-```sh
-cd image_reconstruction
-./run_train_test_rgbimage.sh
+```powershell
+python Neural-Experts\ionization\train_ionization.py --config Neural-Experts\configs\ionization\config_ionization_Hplus.yaml --identifier hplus_main --logdir experiments\neural_experts --gpu 0
 ```
 
-### 4. Train and test on 3D SDFs
-To download the data for 3D SDFs first run
-```sh
-cd data/sdf_3d/
-./download_3d_data.sh
-cd ../..
-```
-Run the following script to train and test on 3D SDFs:
-```sh
-cd surface_reconstruction
-./run_train_test_3d_sdf.sh
+Validation export:
+
+```powershell
+python validate_prediction.py --config experiments\neural_experts\hplus_main\validate_artifacts\config.yaml --checkpoint experiments\neural_experts\hplus_main\validate_artifacts\hplus_main.pth --timestamp 0 --batch-size 262144 --outdir validate_out\hplus_pred --prefix hplus --device cuda
 ```
 
-## Thanks
-We build on top of several related code bases and thank their authors for their work: 
-* [DiGS](https://github.com/Chumbyte/DiGS)
-* [SIREN codebase](https://github.com/vsitzmann/siren)
+## Scope
 
+Retained components:
 
-## License and Citation
+- ionization dataset and configs
+- Neural-Experts INR / INR_MoE model code
+- random-balanced segmentation pretraining
+- ionization loss and stage handling
+- validate-compatible checkpoint export
 
-If you find our work useful in your research, please cite our paper:
+Removed components:
 
-[Paper](https://arxiv.org/abs/2410.21643):
-```bibtex
-@inproceedings{ben2024neuralexperts,
-  title={Neural Experts: Mixture of Experts for Implicit Neural Representations},
-  author={Ben-Shabat, Yizhak and Hewa Koneputugodage, Chamin and Ramasinghe, Sameera and Gould, Stephen},
-  booktitle={Advances in Neural Information Processing Systems (NeurIPS},
-  year={2024}
-}
-```
-
-See [LICENSE](LICENSE) file.
+- legacy task-specific training code and sample assets

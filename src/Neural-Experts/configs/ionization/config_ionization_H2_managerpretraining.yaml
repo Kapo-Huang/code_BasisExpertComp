@@ -35,7 +35,6 @@ MODEL:
   shared_encoder: False
 
 LOSS:
-  sdf_clamp: 3.0
   scale_by_q_grad: False
   loss_type: '1000segmentation'
   segmentation_type: 'ce'

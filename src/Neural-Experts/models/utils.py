@@ -4,7 +4,7 @@ def parse_loss_string(input_string, separator='_'):
     """
         Parse the input string to get the required losses and their weights
         The input string should be a underscore separated list of losses and weights
-        For example: "1.0zls_1.0sdf_1.0normal_1.0div_1.0eikonal_1.0regexperts"
+        For example: "1000valrecon_0.1balance"
     """
     # Split the string by underscores
     parts = input_string.split(separator)

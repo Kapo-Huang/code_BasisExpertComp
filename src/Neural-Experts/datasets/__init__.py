@@ -1,20 +1,11 @@
 from torch.utils.data import DataLoader
 
 def build_dataset(cfg, file_id, training=True):
-    if cfg['DATA'].get('name') == 'RGBINR':
-        from .RGBImages import RGBINRDataset
-        dataset = RGBINRDataset(cfg['DATA'], file_id)
-    elif cfg['DATA'].get('name') == 'sdf_3d':
-        from .dataset3dSDF import SDFdataset3D
-        dataset = SDFdataset3D(cfg, file_id)
-    elif cfg['DATA'].get('name') == 'Audio':
-        from .Audio import AudioINRDataset
-        dataset = AudioINRDataset(cfg['DATA'], file_id)
-    elif cfg['DATA'].get('name') == 'ionization':
+    if cfg['DATA'].get('name') == 'ionization':
         from .Ionization import IonizationINRDataset
         dataset = IonizationINRDataset(cfg, file_id)
     else:
-        raise NotImplementedError
+        raise NotImplementedError("Neural-Experts has been reduced to the ionization task only.")
     return dataset
 
 
