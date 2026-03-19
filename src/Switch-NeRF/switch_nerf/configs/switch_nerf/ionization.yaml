@@ -1,0 +1,108 @@
+experiment_root: ./result/Ionization/Switch-NeRF
+exp_id: switch_nerf-ionization-H+
+
+dataset_path: ./data/raw/ionization
+split: train
+target_attr: H+
+
+data_type: inr
+pos_xyz_dim: 12
+moe_expert_num: 8
+moe_l_aux_wt: 5.0e-4
+use_moe_external_gate: true
+use_gate_input_norm: true
+gate_noise: 0.0
+
+data:
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 100
+  normalize: true
+  compute_target_stats: true
+  target_stats_path: ./data/raw/ionization/train/target_stats_H+.npz
+
+model:
+  layer_num_main: 3
+  sigma_tag: 0
+  dir_tag: 1
+  color_tag: 2
+
+  layers:
+    xyz:
+      in_ch: 100
+      h_ch: 0
+      out_ch: 256
+      num: 1
+      type: mlp
+      act: none
+
+    "0":
+      in_ch: 256
+      h_ch: 256
+      out_ch: 256
+      num: 7
+      skips: [3]
+      init_factor: 1.0
+      type: moe
+      act: relu
+      gate_type: top
+      k: 1
+      fp32_gate: true
+      gate_dim: 256
+
+    sigma:
+      in_ch: 256
+      h_ch: 0
+      out_ch: 1
+      num: 1
+      type: mlp
+      act: none
+
+    moe_external_gate:
+      in_ch: 256
+      h_ch: 256
+      out_ch: 256
+      num: 2
+      type: mlp
+      act: none
+      out_skip: false
+
+    gate_input_norm:
+      in_ch: 256
+      h_ch: 0
+      out_ch: 0
+      num: 1
+      type: layernorm
+
+training:
+  epochs: 600
+  batch_size: 16000
+  pred_batch_size: 16000
+  num_workers: 2
+  batches_per_epoch_budget: 1500
+  lr: 5.0e-5
+  lr_decay_rate: 0.92
+  lr_decay_step: 40
+  val_split: 0.0
+  log_every: 1
+  log_psnr_every: 100
+  psnr_sample_ratio: 0.1
+  save_every: 50
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  hard_topk_warmup_epochs: 10
+  freeze_router_at: 0.8
+  pretrain:
+    enabled: true
+    epochs: 10
+    lr: 5.0e-5
+    batch_size: 16000
+    assignments_method: voxel_clustering
+    cluster_num_time_samples: 7
+    cluster_seed: 42
+    assignments_cache_path: ./data/cache/switch_nerf_hplus_voxel_assignments.npy
+    spatial_blocks: [2, 2, 2]
+    time_block_size: 1
