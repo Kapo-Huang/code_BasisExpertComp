@@ -214,6 +214,16 @@ def _select_timesteps(timestamp: Optional[int], timestamps: str, T: int) -> List
     return [t]
 
 
+def _forward_model_for_attr(model: torch.nn.Module, coords: torch.Tensor, attr_name: str):
+    try:
+        return model(coords, request=attr_name, hard_topk=True)
+    except TypeError:
+        try:
+            return model(coords, hard_topk=True)
+        except TypeError:
+            return model(coords)
+
+
 def _predict_timestep_flat_scalar(
     model: torch.nn.Module,
     dataset,
@@ -257,10 +267,7 @@ def _predict_timestep_flat_scalar(
             coords[:, 2] = (z - x_mean[2]) / x_std[2]
             coords[:, 3] = (t - x_mean[3]) / x_std[3]
 
-            try:
-                pred = model(coords, hard_topk=True)
-            except TypeError:
-                pred = model(coords)
+            pred = _forward_model_for_attr(model, coords, attr_name)
 
             if isinstance(pred, dict):
                 if attr_name not in pred:

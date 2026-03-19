@@ -49,6 +49,7 @@ class LightBasisExpert(nn.Module):
             raise ValueError("head_num_layers must be >= 2")
 
         self.view_names = list(view_specs.keys())
+        self.view_name_to_idx = {name: idx for idx, name in enumerate(self.view_names)}
         self.view_dims = dict(view_specs)
         self.num_views = len(self.view_names)
         self.num_experts = num_experts
@@ -136,7 +137,12 @@ class LightBasisExpert(nn.Module):
         h_views: List[torch.Tensor] = []
         shared_feats: List[torch.Tensor] = []
 
-        for view_idx, name in enumerate(self.view_names):
+        if request is None:
+            view_items = enumerate(self.view_names)
+        else:
+            view_items = [(self.view_name_to_idx[request], request)]
+
+        for view_idx, name in view_items:
             view_ids = torch.full((coords.shape[0],), view_idx, device=coords.device, dtype=torch.long)
             view_embed = self.view_embedding(view_ids)
             probs, _ = self.gating(x_pe, view_embed)

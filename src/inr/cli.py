@@ -35,6 +35,7 @@ from inr.models.basis_expert.light_basis_expert import build_light_basis_expert_
 from inr.models.basis_expert.simple import build_basisExpert_simple_concat_from_config
 from inr.models.sota.coordnet import build_coordnet_from_config
 from inr.models.sota.moe_inr import build_moe_inr_from_config
+from inr.models.sota.neural_expert import build_neural_expert_from_config
 from inr.models.sota.siren import build_siren_from_config
 from inr.models.sota.stsr_inr import (
     build_stsr_inr_from_config,
@@ -81,6 +82,8 @@ def build_model(model_cfg, dataset=None):
         return build_siren_from_config(model_cfg)
     if name in {"moe_inr", "moeinr"}:
         return build_moe_inr_from_config(model_cfg)
+    if name in {"neural_expert", "neuralexpert"}:
+        return build_neural_expert_from_config(model_cfg)
     if name in {"coordnet", "coord_net"}:
         return build_coordnet_from_config(model_cfg)
     if name in {"stsr_inr", "stsrinr"}:

@@ -1,0 +1,62 @@
+experiment: exp_data_ionization_neural_expert
+exp_id: neural_expert-ionization
+experiment_root: experiments
+data:
+  dataset_name: ionization
+  split: train
+  target_stats_path: ./data/raw/ionization/train/target_stats_H+.npz
+  compute_target_stats: true
+  data_root: ./data
+  volume_shape:
+    X: 600
+    Y: 248
+    Z: 248
+    T: 10
+  target_path: ./data/raw/ionization/train/target_H+_sub.npy
+  normalize: true
+model:
+  name: neural_expert
+  in_features: 4
+  out_features: 1
+  num_experts: 7
+  top_k: 1
+  decoder_hidden_dim: 128
+  decoder_n_hidden_layers: 2
+  decoder_input_encoding: learned_128_2_sine_siren_none
+  decoder_nl: sine
+  decoder_init_type: siren
+  decoder_freqs: 30.0
+  manager_hidden_dim: 128
+  manager_n_hidden_layers: 2
+  manager_input_encoding: learned_128_2_sine_siren_none
+  manager_nl: sine
+  manager_init: siren
+  manager_softmax_temperature: 1.0
+  manager_softmax_temp_trainable: false
+  manager_q_activation: softmax
+  manager_clamp_q: 0.0
+  manager_conditioning: cat
+  shared_encoder: false
+training:
+  epochs: 60
+  batch_size: 16000
+  pred_batch_size: 16000
+  num_workers: 4
+  lr: 5.0e-5
+  val_split: 0.1
+  log_every: 1
+  save_every: 5
+  early_stop_patience: 0
+  seed: 42
+  loss_type: mse
+  hard_topk_warmup_epochs: 10
+  freeze_router_at: 0.8
+  pretrain:
+    enabled: true
+    epochs: 1
+    lr: 5.0e-5
+    batch_size: 16000
+    cluster_num_time_samples: 8
+    cluster_seed: 42
+    assignments_method: voxel_clustering
+    assignments_cache_path: ""
