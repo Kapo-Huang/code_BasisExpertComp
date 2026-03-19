@@ -71,6 +71,18 @@ def lossdict2str(loss_dict):
     return string
 
 
+def _estimate_model_size_fp32(model):
+    parameter_count = sum(param.numel() for param in model.parameters())
+    size_bytes = parameter_count * 4
+    return parameter_count, size_bytes
+
+
+def _format_size_bytes(size_bytes):
+    size_mib = size_bytes / (1024 ** 2)
+    size_mb = size_bytes / 1.0e6
+    return f"{size_bytes} bytes ({size_mib:.2f} MiB, {size_mb:.2f} MB)"
+
+
 def _resolve_path(path_str, config_dir):
     path = Path(path_str)
     if path.is_absolute():
@@ -255,8 +267,20 @@ def main(args):
 
     SINR, _ = build_model(cfg, cfg["LOSS"])
     n_parameters = utils.count_parameters(SINR)
-    wandb.log({"number of paramters": n_parameters})
+    total_parameters, model_size_bytes = _estimate_model_size_fp32(SINR)
+    wandb.log(
+        {
+            "number of paramters": n_parameters,
+            "model_size_bytes_fp32": model_size_bytes,
+            "model_size_mib_fp32": model_size_bytes / (1024 ** 2),
+        }
+    )
     utils.log_string(f"Number of parameters in the current model:{n_parameters}", log_file)
+    utils.log_string(
+        f"Model size assuming float32 parameters: {_format_size_bytes(model_size_bytes)} "
+        f"(total parameters: {total_parameters})",
+        log_file,
+    )
 
     training_stage_handler = TrainingStageHandler(cfg["TRAINING"]["stages"], SINR, cfg)
     criterion = training_stage_handler.criterion
