@@ -28,6 +28,7 @@ from inr.models.baseline.base_shared_enc_view_attention_fused_dec_trunk import (
     build_base_shared_enc_view_attention_fused_dec_trunk_from_config,
 )
 from inr.models.basis_expert.light_basis_expert import build_light_basis_expert_from_config
+from inr.models.basis_expert.shared_enc_inr import build_shared_enc_inr_from_config
 from inr.models.sota.coordnet import build_coordnet_from_config
 from inr.models.sota.moe_inr import build_moe_inr_from_config
 from inr.models.sota.siren import build_siren_from_config
@@ -77,6 +78,9 @@ def build_model(model_cfg, dataset=None):
     if name in {"light_basis_expert", "lightbasis_expert", "light_basisexperts"}:
         view_specs = _require_view_specs(dataset, name_raw)
         return build_light_basis_expert_from_config(model_cfg, view_specs)
+    if name in {"shared_enc_inr", "sharedencinr"}:
+        view_specs = _require_view_specs(dataset, name_raw)
+        return build_shared_enc_inr_from_config(model_cfg, view_specs)
 
     if name in {
         "base_shared_enc_view_add_shared_dec_trunk",
