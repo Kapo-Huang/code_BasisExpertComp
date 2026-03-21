@@ -27,20 +27,10 @@ from inr.models.baseline.base_shared_enc_view_add_shared_dec_trunk import (
 from inr.models.baseline.base_shared_enc_view_attention_fused_dec_trunk import (
     build_base_shared_enc_view_attention_fused_dec_trunk_from_config,
 )
-from inr.models.basis_expert.experts_attention import build_basisExperts_attention_from_config
-from inr.models.basis_expert.experts_attention_light_pe import (
-    build_basisExperts_attention_light_pe_from_config,
-)
 from inr.models.basis_expert.light_basis_expert import build_light_basis_expert_from_config
-from inr.models.basis_expert.simple import build_basisExpert_simple_concat_from_config
 from inr.models.sota.coordnet import build_coordnet_from_config
 from inr.models.sota.moe_inr import build_moe_inr_from_config
-from inr.models.sota.neural_expert import build_neural_expert_from_config
 from inr.models.sota.siren import build_siren_from_config
-from inr.models.sota.stsr_inr import (
-    build_stsr_inr_from_config,
-    build_stsr_inr_multiview_from_config,
-)
 from inr.training.loops import (
     GradientBalancerConfig,
     GradientDiagConfig,
@@ -82,25 +72,8 @@ def build_model(model_cfg, dataset=None):
         return build_siren_from_config(model_cfg)
     if name in {"moe_inr", "moeinr"}:
         return build_moe_inr_from_config(model_cfg)
-    if name in {"neural_expert", "neuralexpert"}:
-        return build_neural_expert_from_config(model_cfg)
     if name in {"coordnet", "coord_net"}:
         return build_coordnet_from_config(model_cfg)
-    if name in {"stsr_inr", "stsrinr"}:
-        return build_stsr_inr_from_config(model_cfg)
-    if name in {"stsr_inr_multiview", "stsrinr_multiview"}:
-        view_specs = _require_view_specs(dataset, name_raw)
-        return build_stsr_inr_multiview_from_config(model_cfg, view_specs)
-
-    if name in {"basis_experts", "basisexperts", "basis_expert"}:
-        view_specs = _require_view_specs(dataset, name_raw)
-        return build_basisExpert_simple_concat_from_config(model_cfg, view_specs)
-    if name in {"basis_experts_attention", "basisexperts_attention"}:
-        view_specs = _require_view_specs(dataset, name_raw)
-        return build_basisExperts_attention_from_config(model_cfg, view_specs)
-    if name in {"basis_experts_attention_light_pe", "basisexperts_attention_light_pe"}:
-        view_specs = _require_view_specs(dataset, name_raw)
-        return build_basisExperts_attention_light_pe_from_config(model_cfg, view_specs)
     if name in {"light_basis_expert", "lightbasis_expert", "light_basisexperts"}:
         view_specs = _require_view_specs(dataset, name_raw)
         return build_light_basis_expert_from_config(model_cfg, view_specs)
