@@ -138,20 +138,25 @@ class SharedEncINR(nn.Module):
 
 def build_shared_enc_inr_from_config(cfg: Dict, view_specs: Dict[str, int]) -> SharedEncINR:
     base_dim = cfg.get("base_dim")
-    if base_dim is None:
-        raise ValueError("shared_enc_inr requires model.base_dim")
+    enc_base_dim_raw = cfg.get("enc_base_dim", base_dim)
+    dec_base_dim_raw = cfg.get("dec_base_dim", base_dim)
+    if enc_base_dim_raw is None or dec_base_dim_raw is None:
+        raise ValueError(
+            "shared_enc_inr requires model.enc_base_dim and model.dec_base_dim, or model.base_dim"
+        )
 
     head_hidden_raw = cfg.get("head_hidden_dim")
     decoder_feature_raw = cfg.get("decoder_feature_dim")
 
-    base_dim = int(base_dim)
-    enc_feature_dim = 8 * base_dim
-    view_embed_dim = base_dim
-    enc_hidden_dim = 8 * base_dim
-    decoder_hidden_dim = 8 * base_dim
+    enc_base_dim = int(enc_base_dim_raw)
+    dec_base_dim = int(dec_base_dim_raw)
     decoder_feature_dim = (
-        int(decoder_feature_raw) if decoder_feature_raw is not None else enc_feature_dim
+        int(decoder_feature_raw) if decoder_feature_raw is not None else 8 * dec_base_dim
     )
+    enc_feature_dim = decoder_feature_dim
+    view_embed_dim = enc_base_dim
+    enc_hidden_dim = 8 * enc_base_dim
+    decoder_hidden_dim = 8 * dec_base_dim
     head_hidden_dim = (
         int(head_hidden_raw) if head_hidden_raw is not None else decoder_feature_dim
     )
