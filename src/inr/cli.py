@@ -166,7 +166,7 @@ def resolve_data_paths(data_cfg):
     }
 
 
-def build_experiment_layout(cfg, model_cfg, data_info):
+def build_experiment_layout(cfg, model_cfg, data_info, run_timestamp: str):
     """
     Standardizes experiment outputs under:
     experiments/<exp_id>/{configs,checkpoints,predictions,logs}
@@ -178,15 +178,21 @@ def build_experiment_layout(cfg, model_cfg, data_info):
         exp_id = f"{model_cfg['name'].lower()}-{dataset_token}"
 
     exp_dir = exp_root / exp_id
-    ckpt_path = exp_dir / "checkpoints" / f"{exp_id}.pth"
+    ckpt_path = exp_dir / "checkpoints" / f"{exp_id}_{run_timestamp}.pth"
     pred_path = exp_dir / "predictions" / f"{exp_id}-full.npy"
-    cfg_snapshot = exp_dir / "configs" / "config.yaml"
+    cfg_snapshot = exp_dir / "configs" / f"config_{run_timestamp}.yaml"
+    cfg_snapshot_legacy = exp_dir / "configs" / "config.yaml"
 
     for d in ["configs", "checkpoints", "predictions", "logs"]:
         (exp_dir / d).mkdir(parents=True, exist_ok=True)
 
-    # Persist a copy of the launched config for reproducibility
-    cfg_snapshot.write_text(yaml.safe_dump(cfg), encoding="utf-8")
+    # Persist a copy of the launched config for reproducibility.
+    cfg_snapshot_payload = dict(cfg)
+    cfg_snapshot_payload["run_timestamp"] = run_timestamp
+    cfg_text = yaml.safe_dump(cfg_snapshot_payload)
+    cfg_snapshot.write_text(cfg_text, encoding="utf-8")
+    # Keep legacy path for downstream scripts that still read configs/config.yaml.
+    cfg_snapshot_legacy.write_text(cfg_text, encoding="utf-8")
 
     return {
         "exp_dir": str(exp_dir),
@@ -194,6 +200,7 @@ def build_experiment_layout(cfg, model_cfg, data_info):
         "save_model": str(ckpt_path),
         "save_pred": str(pred_path),
         "config_snapshot": str(cfg_snapshot),
+        "config_snapshot_legacy": str(cfg_snapshot_legacy),
     }
 
 
@@ -232,7 +239,7 @@ def main():
     t1 = time.perf_counter()
     data_info = resolve_data_paths(data_cfg)
     logger.info("Resolve data paths: %.2fs", time.perf_counter() - t1)
-    exp_layout = build_experiment_layout(cfg, model_cfg, data_info)
+    exp_layout = build_experiment_layout(cfg, model_cfg, data_info, run_timestamp)
     setup_logging(log_dir=Path(exp_layout["exp_dir"]) / "logs", run_timestamp=run_timestamp)
 
     stats_path = _resolve_path(
