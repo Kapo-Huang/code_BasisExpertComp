@@ -77,6 +77,5 @@ training:
 - `pred_batch_size` is used to avoid OOM during full-field prediction.
 
 
-ylj：第一次提交
 
 
