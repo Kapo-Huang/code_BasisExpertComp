@@ -1,0 +1,8 @@
+input: data/volRendering_datasets/volRendering_H2.npy
+tthresh: build/tthresh
+psnr: 40.0
+shape: [600, 248, 248]
+
+compressed: outputs/volRendering_H2.tthresh
+recon: outputs/volRendering_H2_recon.npy
+result_json: outputs/volRendering_H2_result.json

@@ -1,0 +1,19 @@
+{
+  "input": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/zfp/data/volRendering_datasets/volRendering_H2.npy",
+  "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/zfp/outputs/volRendering_H2.zfp",
+  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/zfp/outputs/volRendering_H2_recon.npy",
+  "loaded_shape": [
+    36902400
+  ],
+  "used_shape": [
+    600,
+    248,
+    248
+  ],
+  "dtype": "float32",
+  "rate": 4,
+  "precision": null,
+  "tolerance": null,
+  "compress_stdout": "",
+  "decompress_stdout": ""
+}

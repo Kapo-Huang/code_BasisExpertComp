@@ -1,0 +1,8 @@
+input: data/volRendering_datasets/volRendering_H2.npy
+sz3: build/tools/sz3/sz3
+cr: 10000
+shape: [600, 248, 248]
+
+compressed: outputs/volRendering_H2.sz3pkg
+recon: outputs/volRendering_H2_recon.npy
+result_json: outputs/volRendering_H2_result.json
