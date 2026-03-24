@@ -15,7 +15,12 @@ import yaml
 
 from inr.cli import build_model
 from inr.data import MultiTargetVolumetricDataset
-from inr.datasets.base import infer_or_validate_volume_shape, peek_array
+from inr.datasets.base import (
+    infer_or_validate_volume_shape,
+    peek_array,
+    resolve_checkpoint_normalization_scheme,
+    resolve_normalization_scheme,
+)
 from inr.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -449,13 +454,22 @@ def _build_dataset_and_model(cfg, attr_paths_for_model, checkpoint):
 
     normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
     normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
+    normalization_scheme = resolve_normalization_scheme(data_cfg.get("normalization_scheme"))
 
     dataset = MultiTargetVolumetricDataset(
         attr_paths_for_model,
         volume_shape=volume_shape,
         normalize_inputs=normalize_inputs,
         normalize_targets=normalize_targets,
+        normalization_scheme=normalization_scheme,
     )
+
+    ckpt_scheme = resolve_checkpoint_normalization_scheme(checkpoint)
+    if ckpt_scheme != normalization_scheme:
+        raise ValueError(
+            f"Checkpoint normalization_scheme={ckpt_scheme!r} does not match "
+            f"dataset/config normalization_scheme={normalization_scheme!r}"
+        )
 
     model_cfg_local = dict(model_cfg)
     if int(model_cfg_local.get("in_features", 4)) != 4:

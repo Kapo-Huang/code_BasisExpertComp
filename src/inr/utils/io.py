@@ -4,6 +4,7 @@ from pathlib import Path
 from typing import Any, Dict
 
 import torch
+from inr.datasets.base import DEFAULT_NORMALIZATION_SCHEME, resolve_normalization_scheme
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +42,9 @@ def save_checkpoint(
 
     payload: Dict[str, Any] = {
         "model_state": model.state_dict(),
+        "normalization_scheme": resolve_normalization_scheme(
+            getattr(dataset, "normalization_scheme", DEFAULT_NORMALIZATION_SCHEME)
+        ),
         "x_mean": _to_numpy(getattr(dataset, "x_mean", None)),
         "x_std": _to_numpy(getattr(dataset, "x_std", None)),
         "y_mean": _to_numpy(getattr(dataset, "y_mean", None)),

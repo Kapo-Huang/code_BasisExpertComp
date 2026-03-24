@@ -28,6 +28,7 @@ from validate_prediction import (
     _resolve_attr_name,
     _select_timesteps,
     _torch_load_checkpoint,
+    _validate_checkpoint_normalization_scheme,
 )
 
 logger = logging.getLogger(__name__)
@@ -599,6 +600,7 @@ def main() -> int:
     if not checkpoint_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {checkpoint_path}")
     payload = _torch_load_checkpoint(checkpoint_path)
+    _validate_checkpoint_normalization_scheme(dataset, payload)
     model_state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
     model.load_state_dict(model_state, strict=True)
 

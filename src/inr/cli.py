@@ -17,7 +17,11 @@ from inr.data import (
     MultiTargetVolumetricDataset,
     VolumetricDataset,
 )
-from inr.datasets.base import compute_target_stats_streaming
+from inr.datasets.base import (
+    DEFAULT_NORMALIZATION_SCHEME,
+    compute_target_stats_streaming,
+    resolve_normalization_scheme,
+)
 from inr.models.baseline.base_moe_enc_view_add_dec_trunk import (
     build_base_moe_enc_view_add_dec_trunk_from_config,
 )
@@ -160,9 +164,30 @@ def resolve_data_paths(data_cfg):
     }
 
 
-def _load_target_stats(stats_path: str, attr_names=None):
+def _resolve_data_normalization_scheme(data_cfg) -> str:
+    return resolve_normalization_scheme(data_cfg.get("normalization_scheme"))
+
+
+def _stats_scheme_from_npz(data) -> str:
+    if "scheme" not in data:
+        return DEFAULT_NORMALIZATION_SCHEME
+    raw = np.asarray(data["scheme"])
+    if raw.shape == ():
+        return resolve_normalization_scheme(str(raw.item()))
+    flat = raw.reshape(-1)
+    return resolve_normalization_scheme(str(flat[0])) if flat.size else DEFAULT_NORMALIZATION_SCHEME
+
+
+def _load_target_stats(stats_path: str, attr_names=None, expected_scheme: str | None = None):
     stats = {}
     data = np.load(stats_path, allow_pickle=True)
+    stats_scheme = _stats_scheme_from_npz(data)
+    if expected_scheme is not None:
+        expected = resolve_normalization_scheme(expected_scheme)
+        if stats_scheme != expected:
+            raise ValueError(
+                f"Target stats scheme mismatch in {stats_path}: file={stats_scheme!r}, expected={expected!r}"
+            )
     if attr_names:
         names = list(attr_names.keys()) if isinstance(attr_names, dict) else list(attr_names)
         for name in names:
@@ -195,8 +220,8 @@ def _load_target_stats(stats_path: str, attr_names=None):
     return stats
 
 
-def _save_target_stats(stats_path: str, stats, attr_names=None):
-    payload = {}
+def _save_target_stats(stats_path: str, stats, attr_names=None, scheme: str = DEFAULT_NORMALIZATION_SCHEME):
+    payload = {"scheme": np.asarray(resolve_normalization_scheme(scheme))}
     if attr_names:
         names = list(attr_names.keys()) if isinstance(attr_names, dict) else list(attr_names)
         for name in names:
@@ -209,15 +234,21 @@ def _save_target_stats(stats_path: str, stats, attr_names=None):
     np.savez(stats_path, **payload)
 
 
-def _compute_target_stats(y_path=None, attr_paths=None, eps: float = 1e-12):
+def _compute_target_stats(
+    y_path=None,
+    attr_paths=None,
+    eps: float = 1e-12,
+    normalization_scheme: str = DEFAULT_NORMALIZATION_SCHEME,
+):
+    scheme = resolve_normalization_scheme(normalization_scheme)
     if y_path:
         y_np = np.load(y_path, mmap_mode="r")
-        mean, std = compute_target_stats_streaming(y_np, eps=eps)
+        mean, std = compute_target_stats_streaming(y_np, eps=eps, normalization_scheme=scheme)
         return {"mean": mean.numpy(), "std": std.numpy()}
     stats = {}
     for name, path in attr_paths.items():
         arr = np.load(path, mmap_mode="r")
-        mean, std = compute_target_stats_streaming(arr, eps=eps)
+        mean, std = compute_target_stats_streaming(arr, eps=eps, normalization_scheme=scheme)
         stats[name] = {"mean": mean.numpy(), "std": std.numpy()}
     return stats
 
@@ -295,22 +326,53 @@ def main():
 
     normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
     normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
+    normalization_scheme = _resolve_data_normalization_scheme(data_cfg)
     target_stats = None
     stats_path = data_cfg.get("target_stats_path")
     if stats_path and Path(stats_path).exists():
         logger.info("Loading target stats: %s", stats_path)
-        target_stats = _load_target_stats(stats_path, attr_names=data_info.get("attr_paths"))
+        try:
+            target_stats = _load_target_stats(
+                stats_path,
+                attr_names=data_info.get("attr_paths"),
+                expected_scheme=normalization_scheme,
+            )
+        except ValueError:
+            if not data_cfg.get("compute_target_stats", False):
+                raise
+            logger.warning("Stats scheme mismatch. Recomputing target stats: %s", stats_path)
+            target_stats = _compute_target_stats(
+                y_path=data_info.get("y_path"),
+                attr_paths=data_info.get("attr_paths"),
+                eps=float(data_cfg.get("stats_eps", 1e-12)),
+                normalization_scheme=normalization_scheme,
+            )
+            if data_info.get("attr_paths"):
+                _save_target_stats(
+                    stats_path,
+                    target_stats,
+                    attr_names=data_info.get("attr_paths"),
+                    scheme=normalization_scheme,
+                )
+            else:
+                _save_target_stats(stats_path, target_stats, attr_names=None, scheme=normalization_scheme)
     elif stats_path and data_cfg.get("compute_target_stats", False):
         logger.info("Computing target stats: %s", stats_path)
         target_stats = _compute_target_stats(
             y_path=data_info.get("y_path"),
             attr_paths=data_info.get("attr_paths"),
             eps=float(data_cfg.get("stats_eps", 1e-12)),
+            normalization_scheme=normalization_scheme,
         )
         if data_info.get("attr_paths"):
-            _save_target_stats(stats_path, target_stats, attr_names=data_info.get("attr_paths"))
+            _save_target_stats(
+                stats_path,
+                target_stats,
+                attr_names=data_info.get("attr_paths"),
+                scheme=normalization_scheme,
+            )
         else:
-            _save_target_stats(stats_path, target_stats, attr_names=None)
+            _save_target_stats(stats_path, target_stats, attr_names=None, scheme=normalization_scheme)
 
     if data_info.get("attr_paths"):
         t2 = time.perf_counter()
@@ -319,6 +381,7 @@ def main():
             volume_shape=data_info.get("volume_shape"),
             normalize_inputs=normalize_inputs,
             normalize_targets=normalize_targets,
+            normalization_scheme=normalization_scheme,
             target_stats=target_stats,
         )
         logger.info("Dataset init (multi-target): %.2fs", time.perf_counter() - t2)
@@ -329,6 +392,7 @@ def main():
             volume_shape=data_info.get("volume_shape"),
             normalize_inputs=normalize_inputs,
             normalize_targets=normalize_targets,
+            normalization_scheme=normalization_scheme,
             target_stats=target_stats,
         )
         logger.info("Dataset init (single-target): %.2fs", time.perf_counter() - t2)

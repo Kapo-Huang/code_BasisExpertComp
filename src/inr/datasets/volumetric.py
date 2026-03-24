@@ -8,12 +8,14 @@ import torch
 from torch.utils.data import Dataset
 
 from .base import (
+    DEFAULT_NORMALIZATION_SCHEME,
     VolumeShape,
     compute_input_stats_analytic,
     compute_target_stats_streaming,
     idx_to_xyzt,
     infer_or_validate_volume_shape,
     peek_array,
+    resolve_normalization_scheme,
     target_dim_from_array,
 )
 
@@ -29,6 +31,7 @@ class VolumetricDataset(Dataset):
         volume_shape: Optional[VolumeShape] = None,
         normalize_inputs: bool = True,
         normalize_targets: bool = True,
+        normalization_scheme: str = DEFAULT_NORMALIZATION_SCHEME,
         target_stats: Optional[Dict[str, np.ndarray]] = None,
         stats_dtype: np.dtype = np.float64,
         eps: float = 1e-12,
@@ -38,8 +41,9 @@ class VolumetricDataset(Dataset):
 
         self.y_path = y_path
         self.eps = float(eps)
-        self.normalize_inputs = True
-        self.normalize_targets = True
+        self.normalize_inputs = bool(normalize_inputs)
+        self.normalize_targets = bool(normalize_targets)
+        self.normalization_scheme = resolve_normalization_scheme(normalization_scheme)
         self._stats_dtype = stats_dtype
 
         y_np = peek_array(y_path)
@@ -49,7 +53,11 @@ class VolumetricDataset(Dataset):
         del y_np
 
         self.x_mean, self.x_std = compute_input_stats_analytic(
-            self.volume_shape, unbiased=True, dtype=stats_dtype, eps=self.eps
+            self.volume_shape,
+            unbiased=True,
+            dtype=stats_dtype,
+            eps=self.eps,
+            normalization_scheme=self.normalization_scheme,
         )
         self._x_mean_s = self.x_mean.squeeze(0)
         self._x_std_s = self.x_std.squeeze(0)
@@ -119,7 +127,10 @@ class VolumetricDataset(Dataset):
         if self.y_mean is None or self.y_std is None:
             y_np = self._ensure_y_loaded()
             self.y_mean, self.y_std = compute_target_stats_streaming(
-                y_np, eps=self.eps, dtype=self._stats_dtype
+                y_np,
+                eps=self.eps,
+                dtype=self._stats_dtype,
+                normalization_scheme=self.normalization_scheme,
             )
 
     def __getstate__(self):
@@ -141,6 +152,7 @@ class MultiTargetVolumetricDataset(Dataset):
         volume_shape: Optional[VolumeShape] = None,
         normalize_inputs: bool = True,
         normalize_targets: bool = True,
+        normalization_scheme: str = DEFAULT_NORMALIZATION_SCHEME,
         target_stats: Optional[Dict[str, Dict[str, np.ndarray]]] = None,
         stats_dtype: np.dtype = np.float64,
         eps: float = 1e-12,
@@ -153,6 +165,7 @@ class MultiTargetVolumetricDataset(Dataset):
         self.eps = float(eps)
         self.normalize_inputs = bool(normalize_inputs)
         self.normalize_targets = bool(normalize_targets)
+        self.normalization_scheme = resolve_normalization_scheme(normalization_scheme)
         self._stats_dtype = stats_dtype
 
         first_path = next(iter(self.attr_paths.values()))
@@ -169,7 +182,11 @@ class MultiTargetVolumetricDataset(Dataset):
             del arr
 
         self.x_mean, self.x_std = compute_input_stats_analytic(
-            self.volume_shape, unbiased=True, dtype=stats_dtype, eps=self.eps
+            self.volume_shape,
+            unbiased=True,
+            dtype=stats_dtype,
+            eps=self.eps,
+            normalization_scheme=self.normalization_scheme,
         )
         self._x_mean_s = self.x_mean.squeeze(0)
         self._x_std_s = self.x_std.squeeze(0)
@@ -240,7 +257,10 @@ class MultiTargetVolumetricDataset(Dataset):
         if self.y_mean.get(name) is None or self.y_std.get(name) is None:
             y_np = self._ensure_targets_loaded()[name]
             mean_t, std_t = compute_target_stats_streaming(
-                y_np, eps=self.eps, dtype=self._stats_dtype
+                y_np,
+                eps=self.eps,
+                dtype=self._stats_dtype,
+                normalization_scheme=self.normalization_scheme,
             )
             self.y_mean[name] = mean_t
             self.y_std[name] = std_t

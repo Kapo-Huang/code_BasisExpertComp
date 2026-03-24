@@ -11,6 +11,11 @@ import torch
 
 from inr.cli import build_model, load_config, resolve_data_paths
 from inr.data import MultiTargetVolumetricDataset, VolumetricDataset
+from inr.datasets.base import (
+    DEFAULT_NORMALIZATION_SCHEME,
+    resolve_checkpoint_normalization_scheme,
+    resolve_normalization_scheme,
+)
 from inr.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -85,8 +90,18 @@ def _torch_load_checkpoint(path: Path):
         return _load()
 
 
-def _load_target_stats(stats_path: str, attr_paths=None):
+def _load_target_stats(stats_path: str, attr_paths=None, expected_scheme: str | None = None):
     data = np.load(stats_path, allow_pickle=True)
+    stats_scheme = DEFAULT_NORMALIZATION_SCHEME
+    if "scheme" in data:
+        raw = np.asarray(data["scheme"])
+        stats_scheme = resolve_normalization_scheme(str(raw.item()) if raw.shape == () else str(raw.reshape(-1)[0]))
+    if expected_scheme is not None:
+        expected = resolve_normalization_scheme(expected_scheme)
+        if stats_scheme != expected:
+            raise ValueError(
+                f"Target stats scheme mismatch in {stats_path}: file={stats_scheme!r}, expected={expected!r}"
+            )
     if attr_paths:
         stats = {}
         for name in attr_paths.keys():
@@ -106,11 +121,19 @@ def _build_dataset(cfg):
     data_info = resolve_data_paths(data_cfg)
     normalize_inputs = bool(data_cfg.get("normalize_inputs", data_cfg.get("normalize", True)))
     normalize_targets = bool(data_cfg.get("normalize_targets", data_cfg.get("normalize", True)))
+    normalization_scheme = resolve_normalization_scheme(data_cfg.get("normalization_scheme"))
 
     target_stats = None
     stats_path = data_cfg.get("target_stats_path")
     if stats_path and Path(stats_path).exists():
-        target_stats = _load_target_stats(stats_path, attr_paths=data_info.get("attr_paths"))
+        try:
+            target_stats = _load_target_stats(
+                stats_path,
+                attr_paths=data_info.get("attr_paths"),
+                expected_scheme=normalization_scheme,
+            )
+        except ValueError as exc:
+            logger.warning("Ignoring incompatible target stats file %s: %s", stats_path, exc)
 
     if data_info.get("attr_paths"):
         dataset = MultiTargetVolumetricDataset(
@@ -118,6 +141,7 @@ def _build_dataset(cfg):
             volume_shape=data_info.get("volume_shape"),
             normalize_inputs=normalize_inputs,
             normalize_targets=normalize_targets,
+            normalization_scheme=normalization_scheme,
             target_stats=target_stats,
         )
     else:
@@ -126,9 +150,20 @@ def _build_dataset(cfg):
             volume_shape=data_info.get("volume_shape"),
             normalize_inputs=normalize_inputs,
             normalize_targets=normalize_targets,
+            normalization_scheme=normalization_scheme,
             target_stats=target_stats,
         )
     return dataset
+
+
+def _validate_checkpoint_normalization_scheme(dataset, ckpt_payload):
+    ckpt_scheme = resolve_checkpoint_normalization_scheme(ckpt_payload)
+    dataset_scheme = resolve_normalization_scheme(getattr(dataset, "normalization_scheme", None))
+    if ckpt_scheme != dataset_scheme:
+        raise ValueError(
+            f"Checkpoint normalization_scheme={ckpt_scheme!r} does not match "
+            f"dataset/config normalization_scheme={dataset_scheme!r}"
+        )
 
 
 def _resolve_attr_name(dataset, arg_attr: str) -> str:
@@ -318,6 +353,7 @@ def main():
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     payload = _torch_load_checkpoint(ckpt_path)
+    _validate_checkpoint_normalization_scheme(dataset, payload)
     model_state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
     model.load_state_dict(model_state, strict=True)
 
