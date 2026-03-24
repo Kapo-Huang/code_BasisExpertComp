@@ -5,6 +5,7 @@ import csv
 import importlib.util
 import json
 import logging
+import math
 import os
 import shutil
 import subprocess
@@ -23,6 +24,7 @@ from validate_prediction import (
     _build_dataset,
     _build_output_path,
     _predict_timestep_flat_scalar,
+    _resolve_attr_stats,
     _resolve_attr_name,
     _select_timesteps,
     _torch_load_checkpoint,
@@ -448,6 +450,7 @@ def write_metrics_csv(results: list[dict[str, Any]], csv_path: Path) -> None:
         "timestep",
         "pred_path",
         "gt_path",
+        "psnr",
         "ssim",
         "lpips",
         "status",
@@ -465,6 +468,7 @@ def write_metrics_csv(results: list[dict[str, Any]], csv_path: Path) -> None:
                     "timestep": row.get("timestep", ""),
                     "pred_path": row.get("pred_path", ""),
                     "gt_path": row.get("gt_path", ""),
+                    "psnr": "" if row.get("psnr") is None else f"{float(row['psnr']):.8f}",
                     "ssim": "" if row.get("ssim") is None else f"{float(row['ssim']):.8f}",
                     "lpips": "" if row.get("lpips") is None else f"{float(row['lpips']):.8f}",
                     "status": row.get("status", ""),
@@ -488,6 +492,28 @@ def summarize_metric(rows: list[dict[str, Any]], key: str) -> dict[str, float] |
     }
 
 
+def compute_psnr(pred_flat: np.ndarray, gt_flat: np.ndarray) -> float:
+    if pred_flat.shape != gt_flat.shape:
+        raise ValueError(f"PSNR shape mismatch: pred={pred_flat.shape}, gt={gt_flat.shape}")
+
+    diff = np.asarray(pred_flat, dtype=np.float64) - np.asarray(gt_flat, dtype=np.float64)
+    count = int(diff.size)
+    if count <= 0:
+        return float("nan")
+
+    mse = float(np.mean(diff * diff))
+    if mse <= 0.0:
+        return float("inf")
+
+    gt_min = float(np.min(gt_flat))
+    gt_max = float(np.max(gt_flat))
+    data_range = gt_max - gt_min
+    if (not np.isfinite(data_range)) or data_range <= 0.0:
+        data_range = max(abs(gt_min), abs(gt_max)) + 1e-12
+
+    return float(10.0 * math.log10((data_range * data_range) / (mse + 1e-12)))
+
+
 def build_summary(
     results: list[dict[str, Any]],
     case_name: str,
@@ -506,6 +532,7 @@ def build_summary(
         "failed_timesteps": [int(row["timestep"]) for row in failed_rows],
         "success_count": len(success_rows),
         "failure_count": len(failed_rows),
+        "psnr": summarize_metric(success_rows, "psnr"),
         "ssim": summarize_metric(success_rows, "ssim"),
         "lpips": summarize_metric(success_rows, "lpips"),
         "total_inference_seconds": float(total_inference_seconds),
@@ -533,6 +560,14 @@ def log_summary(summary: dict[str, Any]) -> None:
             summary["ssim"]["std"],
             summary["ssim"]["min"],
             summary["ssim"]["max"],
+        )
+    if summary.get("psnr"):
+        logger.info(
+            "PSNR mean=%.6f std=%.6f min=%.6f max=%.6f",
+            summary["psnr"]["mean"],
+            summary["psnr"]["std"],
+            summary["psnr"]["min"],
+            summary["psnr"]["max"],
         )
     if summary.get("lpips"):
         logger.info(
@@ -590,9 +625,18 @@ def main() -> int:
     transfer_function_path = resolve_transfer_function_path(case_name)
     viewport_path = resolve_viewport_path(case_name)
     gt_target_path = resolve_gt_target_path(args.gt_target_path, data_info, attr_name, case_name)
-    gt_source: GroundTruthVolumeSource | None = None
+    gt_metrics_source: GroundTruthVolumeSource | None = None
+    if gt_target_path.is_file():
+        gt_metrics_source = GroundTruthVolumeSource(gt_target_path, dataset.volume_shape)
+    else:
+        logger.warning("GT target not found, PSNR will be skipped: %s", gt_target_path)
+
+    gt_render_source: GroundTruthVolumeSource | None = None
     if args.gt_render_strategy in {"missing", "always"}:
-        gt_source = GroundTruthVolumeSource(gt_target_path, dataset.volume_shape)
+        if gt_target_path.is_file():
+            gt_render_source = gt_metrics_source or GroundTruthVolumeSource(gt_target_path, dataset.volume_shape)
+        else:
+            raise FileNotFoundError(f"GT target file required for --gt-render-strategy={args.gt_render_strategy}: {gt_target_path}")
 
     validation_module = load_validation_module()
     validate_image_pair = validation_module.validate_image_pair
@@ -612,8 +656,15 @@ def main() -> int:
     logger.info("GT PNG directory: %s", gt_png_dir)
     logger.info("Temporary run directory: %s", run_dir)
 
-    denorm_mean = torch.zeros(out_dim, device=inference_device)
-    denorm_std = torch.ones(out_dim, device=inference_device)
+    if bool(getattr(dataset, "normalize_targets", False)):
+        mean_arr, std_arr = _resolve_attr_stats(dataset, payload, attr_name, out_dim)
+        denorm_mean = torch.as_tensor(mean_arr, device=inference_device, dtype=torch.float32)
+        denorm_std = torch.as_tensor(std_arr, device=inference_device, dtype=torch.float32)
+        logger.info("Applying target denormalization for attr=%s", attr_name)
+    else:
+        denorm_mean = torch.zeros(out_dim, device=inference_device)
+        denorm_std = torch.ones(out_dim, device=inference_device)
+        logger.info("Target normalization disabled; skipping prediction denormalization for attr=%s", attr_name)
     total_inference_seconds = 0.0
     results: list[dict[str, Any]] = []
 
@@ -631,6 +682,7 @@ def main() -> int:
                 "timestep": int(t_idx),
                 "pred_path": str(final_pred_png),
                 "gt_path": str(gt_png_path),
+                "psnr": None,
                 "ssim": None,
                 "lpips": None,
                 "status": "pending",
@@ -656,6 +708,11 @@ def main() -> int:
                 total_inference_seconds += infer_time
                 np.save(pred_temp_npy, pred_flat)
 
+                if gt_metrics_source is not None:
+                    stage = "psnr"
+                    gt_flat = gt_metrics_source.extract_scalar_timestep(int(t_idx))
+                    row["psnr"] = compute_psnr(pred_flat, gt_flat)
+
                 stage = "pred_render"
                 pred_rendered_png = run_render_task(
                     args=args,
@@ -672,7 +729,7 @@ def main() -> int:
                     args=args,
                     gt_strategy=args.gt_render_strategy,
                     gt_png_path=gt_png_path,
-                    gt_volume_source=gt_source,
+                    gt_volume_source=gt_render_source,
                     run_dir=run_dir,
                     case_name=case_name,
                     t_idx=int(t_idx),
@@ -693,8 +750,9 @@ def main() -> int:
                 row["lpips"] = None if metrics["lpips"] is None else float(metrics["lpips"])
                 row["status"] = "ok"
                 logger.info(
-                    "t=%d SSIM=%.6f%s",
+                    "t=%d PSNR=%s SSIM=%.6f%s",
                     int(t_idx),
+                    "N/A" if row["psnr"] is None else f"{float(row['psnr']):.6f}",
                     row["ssim"],
                     "" if row["lpips"] is None else f" LPIPS={row['lpips']:.6f}",
                 )
