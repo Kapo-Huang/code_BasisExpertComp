@@ -3,6 +3,7 @@ import logging
 import sys
 import time
 from pathlib import Path
+from typing import List, Optional
 
 import matplotlib
 
@@ -14,7 +15,7 @@ import yaml
 
 from inr.cli import build_model
 from inr.data import MultiTargetVolumetricDataset
-from inr.datasets.base import infer_or_validate_volume_shape, parse_volume_shape, peek_array
+from inr.datasets.base import infer_or_validate_volume_shape, peek_array
 from inr.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
@@ -99,7 +100,7 @@ def _collect_train_attr_paths(train_dir: Path):
 
 
 def _filter_attr_paths_by_shape(attr_paths, volume_shape):
-    parsed_shape = parse_volume_shape(volume_shape)
+    parsed_shape = volume_shape
     if parsed_shape is None:
         return dict(attr_paths), {}
 
@@ -173,6 +174,45 @@ def _build_center_slices_info(volume_shape, t_idx: int):
         "shape_y": (sz, sx),  # (z, x)
         "shape_z": (sy, sx),  # (y, x)
     }
+
+
+def _select_timesteps(
+    timestamp: Optional[int],
+    timestamps: str,
+    time_index: Optional[int],
+    total_t: int,
+) -> List[int]:
+    if total_t <= 0:
+        raise ValueError("Invalid volume shape: T<=0")
+
+    if timestamps and str(timestamps).strip():
+        selected = []
+        seen = set()
+        for token in str(timestamps).split(","):
+            token = token.strip()
+            if not token:
+                continue
+            t = int(token)
+            if t < 0 or t >= total_t:
+                raise ValueError(f"timestamp out of range: {t}, valid [0, {total_t - 1}]")
+            if t not in seen:
+                seen.add(t)
+                selected.append(t)
+        if not selected:
+            raise ValueError("--timestamps was provided but no valid timestep was parsed")
+        return selected
+
+    if timestamp is not None:
+        t = int(timestamp)
+        if t < 0 or t >= total_t:
+            raise ValueError(f"timestamp out of range: {t}, valid [0, {total_t - 1}]")
+        return [t]
+
+    # Backward compatibility with older CLI usage.
+    fallback = 0 if time_index is None else int(time_index)
+    if fallback < 0 or fallback >= total_t:
+        raise ValueError(f"--time-index out of range: {fallback}, valid [0, {total_t - 1}]")
+    return [fallback]
 
 
 def _build_slice_indices(info):
@@ -437,7 +477,9 @@ def process_experiment(
     outdir: Path,
     run_timestamp: str,
     attr_arg: str | None,
-    time_index: int,
+    timestamp: Optional[int],
+    timestamps: str,
+    time_index: Optional[int],
     channel: int,
     batch_size: int,
     device_str: str | None,
@@ -475,110 +517,118 @@ def process_experiment(
     model.eval()
     logger.info("[%s] Stage: build model = %.3fs", exp_name, time.perf_counter() - t_stage)
 
-    info = _build_center_slices_info(dataset.volume_shape, time_index)
-    coords = _build_slice_coords(info)
-    if dataset.normalize_inputs:
-        x_mean = dataset.x_mean.squeeze(0).cpu().numpy().astype(np.float32)
-        x_std = dataset.x_std.squeeze(0).cpu().numpy().astype(np.float32)
-        coords = _normalize_coords(coords, x_mean=x_mean, x_std=x_std)
+    timesteps = _select_timesteps(timestamp, timestamps, time_index, int(dataset.volume_shape.T))
 
-    run_tag = (
-        f"basis_t{int(info['t']):03d}_ch{int(channel)}"
-        f"_mx{int(info['mx'])}_my{int(info['my'])}_mz{int(info['mz'])}"
-    )
-    run_dir = outdir / exp_name / run_tag
-    run_dir.mkdir(parents=True, exist_ok=True)
+    outdir.mkdir(parents=True, exist_ok=True)
 
     selected_attrs = _parse_requested_attrs(attr_arg, attr_paths.keys())
-    logger.info(
-        "[%s] Start slicing: t=%s center=(mx=%s,my=%s,mz=%s), attrs=%s",
-        exp_name,
-        info["t"],
-        info["mx"],
-        info["my"],
-        info["mz"],
-        selected_attrs,
-    )
-
-    shape_by_plane = {
-        "x": info["shape_x"],
-        "y": info["shape_y"],
-        "z": info["shape_z"],
-    }
+    logger.info("[%s] Timesteps selected: %s, attrs=%s", exp_name, timesteps, selected_attrs)
 
     all_outputs = []
-    for attr_name in selected_attrs:
-        t_attr = time.perf_counter()
-        attr_dim = int(dataset.view_specs()[attr_name])
-        if channel < 0 or channel >= attr_dim:
-            raise ValueError(f"--channel out of range for '{attr_name}': valid [0, {attr_dim - 1}]")
+    for t_idx in timesteps:
+        info = _build_center_slices_info(dataset.volume_shape, int(t_idx))
+        timestep_dir = outdir / str(int(info["t"]))
+        timestep_dir.mkdir(parents=True, exist_ok=True)
+        coords = _build_slice_coords(info)
+        if dataset.normalize_inputs:
+            x_mean = dataset.x_mean.squeeze(0).cpu().numpy().astype(np.float32)
+            x_std = dataset.x_std.squeeze(0).cpu().numpy().astype(np.float32)
+            coords = _normalize_coords(coords, x_mean=x_mean, x_std=x_std)
 
-        mean = None
-        std = None
-        if dataset.normalize_targets:
-            mean, std = _resolve_denorm_stats(dataset, checkpoint, attr_name, channel)
-
-        gt_slices = _extract_gt_slices(attr_paths[attr_name], info, channel)
-        expert_slices = _predict_expert_slice_outputs(
-            model=model,
-            coords_by_plane=coords,
-            shape_by_plane=shape_by_plane,
-            attr_name=attr_name,
-            channel=channel,
-            batch_size=batch_size,
-            device=device,
-            mean=mean,
-            std=std,
+        logger.info(
+            "[%s] Start slicing: t=%s center=(mx=%s,my=%s,mz=%s)",
+            exp_name,
+            info["t"],
+            info["mx"],
+            info["my"],
+            info["mz"],
         )
 
-        vmin, vmax = _collect_color_range(gt_slices, expert_slices, clip_percentile)
-        cmap, vmin, vmax = _choose_cmap(cmap_arg, vmin, vmax)
+        shape_by_plane = {
+            "x": info["shape_x"],
+            "y": info["shape_y"],
+            "z": info["shape_z"],
+        }
 
-        attr_safe = _safe_name(attr_name)
-        gt_path = run_dir / f"{attr_safe}_gt_orth.png"
-        _plot_orthogonal_slices(
-            slices=gt_slices,
-            outpath=gt_path,
-            title=f"{exp_name} | {attr_name} | GT | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
-            attr_name=attr_name,
-            subject_name="GT",
-            cmap=cmap,
-            vmin=vmin,
-            vmax=vmax,
-            dpi=dpi,
-        )
+        for attr_name in selected_attrs:
+            t_attr = time.perf_counter()
+            attr_dim = int(dataset.view_specs()[attr_name])
+            if channel < 0 or channel >= attr_dim:
+                raise ValueError(f"--channel out of range for '{attr_name}': valid [0, {attr_dim - 1}]")
 
-        expert_paths = []
-        num_experts = int(expert_slices["x"].shape[-1])
-        for expert_idx in range(num_experts):
-            pred_slice = {
-                "x": expert_slices["x"][:, :, expert_idx],
-                "y": expert_slices["y"][:, :, expert_idx],
-                "z": expert_slices["z"][:, :, expert_idx],
-            }
-            pred_path = run_dir / f"{attr_safe}_expert_{int(expert_idx):02d}_orth.png"
-            _plot_orthogonal_slices(
-                slices=pred_slice,
-                outpath=pred_path,
-                title=f"{exp_name} | {attr_name} | Expert {expert_idx} | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+            mean = None
+            std = None
+            if dataset.normalize_targets:
+                mean, std = _resolve_denorm_stats(dataset, checkpoint, attr_name, channel)
+
+            gt_slices = _extract_gt_slices(attr_paths[attr_name], info, channel)
+            expert_slices = _predict_expert_slice_outputs(
+                model=model,
+                coords_by_plane=coords,
+                shape_by_plane=shape_by_plane,
                 attr_name=attr_name,
-                subject_name=f"Expert {expert_idx}",
+                channel=channel,
+                batch_size=batch_size,
+                device=device,
+                mean=mean,
+                std=std,
+            )
+
+            vmin, vmax = _collect_color_range(gt_slices, expert_slices, clip_percentile)
+            cmap, vmin, vmax = _choose_cmap(cmap_arg, vmin, vmax)
+
+            attr_safe = _safe_name(attr_name)
+            gt_path = timestep_dir / f"{attr_safe}_gt_orth.png"
+            _plot_orthogonal_slices(
+                slices=gt_slices,
+                outpath=gt_path,
+                title=f"{exp_name} | {attr_name} | GT | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+                attr_name=attr_name,
+                subject_name="GT",
                 cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
                 dpi=dpi,
             )
-            expert_paths.append(pred_path)
 
-        all_outputs.append(
-            {
-                "attr": attr_name,
-                "gt": gt_path,
-                "experts": expert_paths,
-                "num_experts": num_experts,
-            }
-        )
-        logger.info("[%s] Attr %s done = %.3fs", exp_name, attr_name, time.perf_counter() - t_attr)
+            expert_paths = []
+            num_experts = int(expert_slices["x"].shape[-1])
+            for expert_idx in range(num_experts):
+                pred_slice = {
+                    "x": expert_slices["x"][:, :, expert_idx],
+                    "y": expert_slices["y"][:, :, expert_idx],
+                    "z": expert_slices["z"][:, :, expert_idx],
+                }
+                pred_path = timestep_dir / f"{attr_safe}_expert_{int(expert_idx):02d}_orth.png"
+                _plot_orthogonal_slices(
+                    slices=pred_slice,
+                    outpath=pred_path,
+                    title=f"{exp_name} | {attr_name} | Expert {expert_idx} | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+                    attr_name=attr_name,
+                    subject_name=f"Expert {expert_idx}",
+                    cmap=cmap,
+                    vmin=vmin,
+                    vmax=vmax,
+                    dpi=dpi,
+                )
+                expert_paths.append(pred_path)
+
+            all_outputs.append(
+                {
+                    "timestep": int(info["t"]),
+                    "attr": attr_name,
+                    "gt": gt_path,
+                    "experts": expert_paths,
+                    "num_experts": num_experts,
+                }
+            )
+            logger.info(
+                "[%s] Attr %s @ t=%d done = %.3fs",
+                exp_name,
+                attr_name,
+                int(info["t"]),
+                time.perf_counter() - t_attr,
+            )
 
     logger.info("[%s] Stage: total = %.3fs", exp_name, time.perf_counter() - t_start)
     return all_outputs
@@ -593,7 +643,19 @@ def main():
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (.pth)")
     parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
     parser.add_argument("--attr", type=str, default=None, help="attr name or comma list; default=all attrs")
-    parser.add_argument("--time-index", type=int, default=0, help="time index t")
+    parser.add_argument(
+        "--timestamp",
+        type=int,
+        default=None,
+        help="Single timestep to visualize. Overrides --time-index.",
+    )
+    parser.add_argument(
+        "--timestamps",
+        type=str,
+        default="",
+        help="Comma-separated timesteps to visualize, e.g. '20,50,70'.",
+    )
+    parser.add_argument("--time-index", type=int, default=0, help="Legacy single timestep t")
     parser.add_argument("--channel", type=int, default=0, help="channel index for multi-channel attr")
     parser.add_argument("--batch-size", type=int, default=65536, help="inference batch size")
     parser.add_argument("--device", type=str, default=None, help="force device, e.g. cpu/cuda:0")
@@ -634,7 +696,9 @@ def main():
             outdir=outdir,
             run_timestamp=run_timestamp,
             attr_arg=args.attr,
-            time_index=int(args.time_index),
+            timestamp=args.timestamp,
+            timestamps=args.timestamps,
+            time_index=int(args.time_index) if args.time_index is not None else None,
             channel=int(args.channel),
             batch_size=int(args.batch_size),
             device_str=args.device,
