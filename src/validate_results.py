@@ -1,4 +1,5 @@
 import argparse
+import csv
 import importlib
 import logging
 import math
@@ -12,12 +13,29 @@ import torch
 
 from inr.cli import _resolve_path, build_model, load_config, resolve_data_paths
 from inr.data import MultiViewCoordDataset, NodeDataset
-from inr.utils.logging_utils import setup_logging
 from inr.utils.io import warn_if_multiview_attr_order_mismatch
+from inr.utils.logging_utils import setup_logging
 
 logger = logging.getLogger(__name__)
 
 _MESH_SUBDIRS = ("validate_mesh", "mesh_vtu", "wind_vtu")
+_CSV_FIELDNAMES = [
+    "row_type",
+    "exp_id",
+    "model_name",
+    "dataset_name",
+    "checkpoint_path",
+    "attr",
+    "time_index",
+    "raw_time",
+    "num_samples",
+    "num_timesteps",
+    "gt_render_path",
+    "pred_render_path",
+    "psnr",
+    "ssim",
+    "lpips",
+]
 
 
 def _parse_args():
@@ -33,7 +51,13 @@ def _parse_args():
         "--timestamp",
         type=int,
         default=None,
-        help="0-based index into sorted unique timesteps. Default: evenly render up to 20 timesteps.",
+        help="0-based index into sorted unique timesteps. Default: render all timesteps.",
+    )
+    parser.add_argument(
+        "--csv",
+        type=str,
+        default="",
+        help="Path to metrics CSV. Default: validate_out/<dataset_name>/<exp_id>/<exp_id>_metrics.csv",
     )
     return parser.parse_args()
 
@@ -221,10 +245,13 @@ def _predict_block(
     return {name: torch.cat(chunks, dim=0) for name, chunks in pred_chunks.items()}
 
 
-def _denormalize_prediction(dataset, attr_name: str, pred_cpu: torch.Tensor) -> np.ndarray:
+def _denormalize_values(dataset, attr_name: str, values: torch.Tensor | np.ndarray) -> np.ndarray:
+    tensor = values if isinstance(values, torch.Tensor) else torch.as_tensor(values, dtype=torch.float32)
+    if tensor.ndim == 1:
+        tensor = tensor[:, None]
     if isinstance(dataset, MultiViewCoordDataset):
-        return dataset.denormalize_attr(attr_name, pred_cpu).cpu().numpy()
-    return dataset.denormalize_targets(pred_cpu).cpu().numpy()
+        return dataset.denormalize_attr(attr_name, tensor).cpu().numpy()
+    return dataset.denormalize_targets(tensor).cpu().numpy()
 
 
 def _compute_time_indexers(time_values: np.ndarray) -> list[tuple[float, slice | np.ndarray]]:
@@ -264,17 +291,29 @@ def _indexer_size(indexer: slice | np.ndarray) -> int:
 
 
 def _select_default_timestamps(num_timesteps: int) -> list[int]:
-    if num_timesteps <= 0:
-        return []
-    k = min(20, num_timesteps)
-    selected = []
-    seen = set()
-    for i in range(k):
-        idx = int(math.floor(i * num_timesteps / k))
-        if idx not in seen:
-            selected.append(idx)
-            seen.add(idx)
-    return selected
+    return list(range(max(0, int(num_timesteps))))
+
+
+def _compute_psnr_from_mse(mse: float, gt_min: float, gt_max: float) -> float:
+    if not np.isfinite(mse) or mse < 0:
+        return float("nan")
+    if mse == 0:
+        return float("inf")
+    data_range = float(gt_max - gt_min)
+    if not np.isfinite(data_range) or data_range <= 0:
+        data_range = max(abs(float(gt_min)), abs(float(gt_max))) + 1e-12
+    return float(10.0 * math.log10((data_range * data_range) / (mse + 1e-12)))
+
+
+def _compute_psnr(gt: np.ndarray, pred: np.ndarray) -> float:
+    gt_arr = np.asarray(gt, dtype=np.float64)
+    pred_arr = np.asarray(pred, dtype=np.float64)
+    if gt_arr.shape != pred_arr.shape:
+        raise ValueError(f"PSNR shape mismatch: gt={gt_arr.shape}, pred={pred_arr.shape}")
+    mse = float(np.mean((pred_arr - gt_arr) ** 2))
+    gt_min = float(np.min(gt_arr))
+    gt_max = float(np.max(gt_arr))
+    return _compute_psnr_from_mse(mse, gt_min, gt_max)
 
 
 @lru_cache(maxsize=None)
@@ -380,14 +419,32 @@ def _resolve_mesh_for_timestep(
     return chosen_path, association
 
 
+def _ensure_rgb_uint8(image: np.ndarray) -> np.ndarray:
+    array = np.asarray(image)
+    if array.ndim != 3:
+        raise ValueError(f"Expected image with shape (H, W, C), got {array.shape}")
+    if array.shape[2] == 4:
+        array = array[:, :, :3]
+    elif array.shape[2] == 1:
+        array = np.repeat(array, 3, axis=2)
+    elif array.shape[2] != 3:
+        raise ValueError(f"Expected 1/3/4 image channels, got {array.shape[2]}")
+
+    if np.issubdtype(array.dtype, np.floating):
+        scale = 255.0 if float(np.nanmax(array)) <= 1.0 + 1e-6 else 1.0
+        array = array * scale
+    array = np.nan_to_num(array, nan=255.0, posinf=255.0, neginf=0.0)
+    return np.clip(array, 0, 255).astype(np.uint8, copy=False)
+
+
 def _render_frame(
     mesh_path: Path,
     association: str,
     values: np.ndarray,
-    outpath: Path,
+    outpath: Path | None,
     clim: tuple[float, float],
     zoom_factor: float,
-):
+) -> np.ndarray:
     import pyvista as pv
 
     array = np.asarray(values)
@@ -409,7 +466,9 @@ def _render_frame(
     else:
         raise ValueError(f"Unknown association: {association}")
 
-    outpath.parent.mkdir(parents=True, exist_ok=True)
+    if outpath is not None:
+        outpath.parent.mkdir(parents=True, exist_ok=True)
+
     plotter = pv.Plotter(off_screen=True, window_size=(1800, 1400))
     plotter.set_background("white")
     plotter.add_mesh(
@@ -422,11 +481,13 @@ def _render_frame(
     )
     plotter.reset_camera()
     plotter.camera.zoom(float(zoom_factor))
-    plotter.show(screenshot=str(outpath))
+    plotter.render()
+    image = plotter.screenshot(filename=str(outpath) if outpath is not None else None, return_img=True)
     plotter.close()
+    return _ensure_rgb_uint8(image)
 
 
-def _ensure_pyvista_available():
+def _ensure_runtime_dependencies():
     try:
         import pyvista  # noqa: F401
     except ImportError as exc:
@@ -434,9 +495,39 @@ def _ensure_pyvista_available():
             "pyvista is required to render validation images. Install pyvista in the active Python environment."
         ) from exc
 
+    try:
+        import lpips  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "lpips is required to compute LPIPS on rendered images. Install lpips in the active Python environment."
+        ) from exc
 
-def _prepare_output_path(out_root: Path, exp_id: str, attr_name: str, kind: str, time_index: int) -> Path:
-    return out_root / exp_id / attr_name / f"{exp_id}_t{time_index:04d}_{kind}.png"
+    try:
+        from skimage.metrics import structural_similarity as _  # noqa: F401
+    except ImportError as exc:
+        raise RuntimeError(
+            "scikit-image is required to compute SSIM on rendered images. Install scikit-image in the active Python environment."
+        ) from exc
+
+
+def _prepare_output_path(
+    out_root: Path,
+    dataset_name: str,
+    exp_id: str,
+    attr_name: str,
+    kind: str,
+    time_index: int,
+) -> Path:
+    return out_root / dataset_name / attr_name / exp_id / f"{exp_id}_t{time_index:04d}_{kind}.png"
+
+
+def _default_csv_path(out_root: Path, dataset_name: str, exp_id: str) -> Path:
+    return out_root / dataset_name / exp_id / f"{exp_id}_metrics.csv"
+
+
+def _dataset_name(data_info: dict) -> str:
+    name = str(data_info.get("dataset_name", "")).strip()
+    return name or "unknown"
 
 
 def _render_zoom_factor(data_info: dict) -> float:
@@ -444,6 +535,57 @@ def _render_zoom_factor(data_info: dict) -> float:
     if dataset_name == "ocean":
         return 1.8
     return 1.35
+
+
+def _compute_ssim(gt_image: np.ndarray, pred_image: np.ndarray) -> float:
+    from skimage.metrics import structural_similarity
+
+    gt_rgb = _ensure_rgb_uint8(gt_image)
+    pred_rgb = _ensure_rgb_uint8(pred_image)
+    if gt_rgb.shape != pred_rgb.shape:
+        raise ValueError(f"SSIM image shape mismatch: gt={gt_rgb.shape}, pred={pred_rgb.shape}")
+    return float(structural_similarity(gt_rgb, pred_rgb, channel_axis=-1, data_range=255))
+
+
+def _build_lpips_model(device: torch.device) -> torch.nn.Module:
+    import lpips
+
+    return lpips.LPIPS(net="alex").to(device).eval()
+
+
+def _lpips_tensor_from_image(image: np.ndarray, device: torch.device) -> torch.Tensor:
+    rgb = _ensure_rgb_uint8(image).astype(np.float32) / 127.5 - 1.0
+    chw = np.transpose(rgb, (2, 0, 1))
+    return torch.from_numpy(chw).unsqueeze(0).to(device=device, dtype=torch.float32)
+
+
+def _compute_lpips(
+    lpips_model: torch.nn.Module,
+    gt_image: np.ndarray,
+    pred_image: np.ndarray,
+    device: torch.device,
+) -> float:
+    gt_tensor = _lpips_tensor_from_image(gt_image, device)
+    pred_tensor = _lpips_tensor_from_image(pred_image, device)
+    with torch.inference_mode():
+        score = lpips_model(gt_tensor, pred_tensor)
+    return float(score.detach().cpu().reshape(-1)[0])
+
+
+def _mean_finite(values: list[float]) -> float:
+    finite = [float(v) for v in values if np.isfinite(v)]
+    if not finite:
+        return float("nan")
+    return float(np.mean(np.asarray(finite, dtype=np.float64)))
+
+
+def _write_csv_rows(csv_path: Path, rows: list[dict[str, object]]):
+    csv_path.parent.mkdir(parents=True, exist_ok=True)
+    with csv_path.open("w", newline="", encoding="utf-8") as handle:
+        writer = csv.DictWriter(handle, fieldnames=_CSV_FIELDNAMES)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
 
 
 def main():
@@ -458,7 +600,7 @@ def main():
     if not cfg_path.exists():
         raise FileNotFoundError(f"Config not found: {cfg_path}")
 
-    ckpt_path = _pick_checkpoint(exp_dir / "checkpoints")
+    ckpt_path = _pick_checkpoint(exp_dir / "checkpoints").resolve()
     cfg = load_config(str(cfg_path))
     exp_id = str(cfg.get("exp_id") or exp_dir.name)
 
@@ -509,7 +651,7 @@ def main():
         step["mesh_path"] = mesh_path
         step["mesh_association"] = association
 
-    _ensure_pyvista_available()
+    _ensure_runtime_dependencies()
 
     model = build_model(cfg["model"], dataset)
     payload = _torch_load_checkpoint(ckpt_path)
@@ -525,6 +667,7 @@ def main():
 
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     model = model.to(device).eval()
+    lpips_model = _build_lpips_model(device)
 
     batch_size = int(
         cfg.get("training", {}).get(
@@ -537,10 +680,16 @@ def main():
         for name, path in gt_paths.items()
     }
 
+    dataset_name = _dataset_name(data_info)
+    out_root = Path("validate_out")
+    csv_path = Path(args.csv).resolve() if args.csv else _default_csv_path(out_root, dataset_name, exp_id).resolve()
+
     logger.info("Experiment: %s", exp_id)
+    logger.info("Dataset: %s", dataset_name)
     logger.info("Config: %s", cfg_path)
     logger.info("Checkpoint: %s", ckpt_path)
     logger.info("Attrs: %s", attrs)
+    logger.info("CSV output: %s", csv_path)
     logger.info("Render zoom factor: %.2f", _render_zoom_factor(data_info))
     logger.info(
         "Rendering timesteps: %s",
@@ -548,41 +697,62 @@ def main():
     )
 
     attr_clims: dict[str, tuple[float, float] | None] = {name: None for name in attrs}
-    logger.info("Pass 1/2: collecting per-attr color ranges")
+    psnr_map: dict[tuple[str, int], float] = {}
+
+    logger.info("Pass 1/2: collecting per-attr color ranges and PSNR")
     for step in selected_steps:
         coords_block = _select_tensor_block(dataset.x, step["indexer"])
         pred_map = _predict_block(model, coords_block, attrs, batch_size, device)
         for attr_name in attrs:
-            pred_vis = _to_visual_scalar(
-                _denormalize_prediction(dataset, attr_name, pred_map[attr_name])
+            pred_denorm = _denormalize_values(dataset, attr_name, pred_map[attr_name])
+            gt_denorm = _denormalize_values(
+                dataset,
+                attr_name,
+                _select_array_block(gt_arrays[attr_name], step["indexer"]),
             )
-            gt_vis = _to_visual_scalar(
-                _select_array_block(gt_arrays[attr_name], step["indexer"])
-            )
+            pred_vis = _to_visual_scalar(pred_denorm)
+            gt_vis = _to_visual_scalar(gt_denorm)
             attr_clims[attr_name] = _merge_range(attr_clims[attr_name], pred_vis)
             attr_clims[attr_name] = _merge_range(attr_clims[attr_name], gt_vis)
+            psnr_map[(attr_name, int(step["time_index"]))] = _compute_psnr(gt_denorm, pred_denorm)
 
     normalized_clims = {
         attr_name: _normalize_clim(clim)
         for attr_name, clim in attr_clims.items()
     }
     zoom_factor = _render_zoom_factor(data_info)
+    per_timestep_rows: list[dict[str, object]] = []
 
-    out_root = Path("validate_out")
     logger.info("Pass 2/2: rendering frames to %s", out_root.resolve())
     for step in selected_steps:
         coords_block = _select_tensor_block(dataset.x, step["indexer"])
         pred_map = _predict_block(model, coords_block, attrs, batch_size, device)
         for attr_name in attrs:
-            pred_vis = _to_visual_scalar(
-                _denormalize_prediction(dataset, attr_name, pred_map[attr_name])
+            pred_denorm = _denormalize_values(dataset, attr_name, pred_map[attr_name])
+            gt_denorm = _denormalize_values(
+                dataset,
+                attr_name,
+                _select_array_block(gt_arrays[attr_name], step["indexer"]),
             )
-            gt_vis = _to_visual_scalar(
-                _select_array_block(gt_arrays[attr_name], step["indexer"])
+            pred_vis = _to_visual_scalar(pred_denorm)
+            gt_vis = _to_visual_scalar(gt_denorm)
+            pred_out = _prepare_output_path(
+                out_root,
+                dataset_name,
+                exp_id,
+                attr_name,
+                "pred",
+                int(step["time_index"]),
             )
-            pred_out = _prepare_output_path(out_root, exp_id, attr_name, "pred", step["time_index"])
-            gt_out = _prepare_output_path(out_root, exp_id, attr_name, "gt", step["time_index"])
-            _render_frame(
+            gt_out = _prepare_output_path(
+                out_root,
+                dataset_name,
+                exp_id,
+                attr_name,
+                "gt",
+                int(step["time_index"]),
+            )
+            pred_img = _render_frame(
                 mesh_path=step["mesh_path"],
                 association=step["mesh_association"],
                 values=pred_vis,
@@ -590,7 +760,7 @@ def main():
                 clim=normalized_clims[attr_name],
                 zoom_factor=zoom_factor,
             )
-            _render_frame(
+            gt_img = _render_frame(
                 mesh_path=step["mesh_path"],
                 association=step["mesh_association"],
                 values=gt_vis,
@@ -598,13 +768,84 @@ def main():
                 clim=normalized_clims[attr_name],
                 zoom_factor=zoom_factor,
             )
+            ssim_value = _compute_ssim(gt_img, pred_img)
+            lpips_value = _compute_lpips(lpips_model, gt_img, pred_img, device)
+            per_timestep_rows.append(
+                {
+                    "row_type": "per_timestep",
+                    "exp_id": exp_id,
+                    "model_name": str(cfg.get("model", {}).get("name", "")),
+                    "dataset_name": dataset_name,
+                    "checkpoint_path": str(ckpt_path),
+                    "attr": attr_name,
+                    "time_index": int(step["time_index"]),
+                    "raw_time": float(step["raw_time"]),
+                    "num_samples": int(step["sample_count"]),
+                    "num_timesteps": int(num_timesteps),
+                    "gt_render_path": str(gt_out.resolve()),
+                    "pred_render_path": str(pred_out.resolve()),
+                    "psnr": psnr_map[(attr_name, int(step["time_index"]))],
+                    "ssim": ssim_value,
+                    "lpips": lpips_value,
+                }
+            )
             logger.info(
-                "Rendered attr=%s timestep=%s -> pred=%s gt=%s",
+                "Rendered attr=%s timestep=%s -> pred=%s gt=%s psnr=%.6f ssim=%.6f lpips=%.6f",
                 attr_name,
                 step["time_index"],
                 pred_out,
                 gt_out,
+                float(psnr_map[(attr_name, int(step["time_index"]))]),
+                float(ssim_value),
+                float(lpips_value),
             )
+
+    summary_rows: list[dict[str, object]] = []
+    for attr_name in attrs:
+        attr_rows = [row for row in per_timestep_rows if row["attr"] == attr_name]
+        summary_rows.append(
+            {
+                "row_type": "attr_mean",
+                "exp_id": exp_id,
+                "model_name": str(cfg.get("model", {}).get("name", "")),
+                "dataset_name": dataset_name,
+                "checkpoint_path": str(ckpt_path),
+                "attr": attr_name,
+                "time_index": "",
+                "raw_time": "",
+                "num_samples": "",
+                "num_timesteps": int(num_timesteps),
+                "gt_render_path": "",
+                "pred_render_path": "",
+                "psnr": _mean_finite([float(row["psnr"]) for row in attr_rows]),
+                "ssim": _mean_finite([float(row["ssim"]) for row in attr_rows]),
+                "lpips": _mean_finite([float(row["lpips"]) for row in attr_rows]),
+            }
+        )
+
+    summary_rows.append(
+        {
+            "row_type": "global_mean",
+            "exp_id": exp_id,
+            "model_name": str(cfg.get("model", {}).get("name", "")),
+            "dataset_name": dataset_name,
+            "checkpoint_path": str(ckpt_path),
+            "attr": "__all__",
+            "time_index": "",
+            "raw_time": "",
+            "num_samples": "",
+            "num_timesteps": int(num_timesteps),
+            "gt_render_path": "",
+            "pred_render_path": "",
+            "psnr": _mean_finite([float(row["psnr"]) for row in per_timestep_rows]),
+            "ssim": _mean_finite([float(row["ssim"]) for row in per_timestep_rows]),
+            "lpips": _mean_finite([float(row["lpips"]) for row in per_timestep_rows]),
+        }
+    )
+
+    rows = per_timestep_rows + summary_rows
+    _write_csv_rows(csv_path, rows)
+    logger.info("Saved validation metrics to CSV: %s", csv_path)
 
 
 if __name__ == "__main__":
