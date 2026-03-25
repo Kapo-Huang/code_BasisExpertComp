@@ -13,6 +13,44 @@ def ensure_dir(path: str):
     Path(path).parent.mkdir(parents=True, exist_ok=True)
 
 
+def get_checkpoint_multiview_attr_order(payload: Any) -> list[str] | None:
+    if not isinstance(payload, dict):
+        return None
+    for key in ("y_mean", "y_std"):
+        mapping = payload.get(key)
+        if isinstance(mapping, dict) and mapping:
+            return [str(name) for name in mapping.keys()]
+    return None
+
+
+def warn_if_multiview_attr_order_mismatch(
+    payload: Any,
+    current_attr_names,
+    *,
+    context: str,
+    logger_override: logging.Logger | None = None,
+) -> bool:
+    checkpoint_attr_names = get_checkpoint_multiview_attr_order(payload)
+    current_names = [str(name) for name in current_attr_names]
+    if checkpoint_attr_names is None or not current_names:
+        return False
+    if checkpoint_attr_names == current_names:
+        return False
+    if set(checkpoint_attr_names) != set(current_names):
+        return False
+
+    active_logger = logger_override or logger
+    active_logger.warning(
+        "Checkpoint multiview attr order differs from current config order at %s. "
+        "This can silently swap view-conditioned outputs. checkpoint_order=%s current_order=%s. "
+        "Check configs/config.yaml and the training-time attr_paths order.",
+        context,
+        checkpoint_attr_names,
+        current_names,
+    )
+    return True
+
+
 def save_checkpoint(
     model: torch.nn.Module,
     dataset,

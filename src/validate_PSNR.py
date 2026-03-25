@@ -13,6 +13,7 @@ import torch
 from inr.cli import build_model, load_config, resolve_data_paths
 from inr.data import MultiViewCoordDataset, NodeDataset
 from inr.utils.logging_utils import setup_logging
+from inr.utils.io import warn_if_multiview_attr_order_mismatch
 
 logger = logging.getLogger(__name__)
 try:
@@ -179,16 +180,15 @@ def _infer_output_dims(dataset, attrs: List[str]) -> Dict[str, int]:
     return {attrs[0]: out_dim}
 
 
-def _get_timestep_indices(coords_np: np.ndarray, time_col: int = -1) -> Dict[int, np.ndarray]:
+def _get_timestep_indices(coords_np: np.ndarray, time_col: int = -1) -> Dict[float, np.ndarray]:
     """
-    Extract indices grouped by timestep (assumes last column is time).
-    Returns dict: {timestep_value: array of indices}
+    Extract indices grouped by raw timestep values (assumes last column is time).
     """
     time_vals = coords_np[:, time_col]
     unique_times = np.unique(time_vals)
     indices = {}
     for t_val in unique_times:
-        indices[int(t_val)] = np.where(time_vals == t_val)[0]
+        indices[float(t_val)] = np.where(time_vals == t_val)[0]
     return indices
 
 
@@ -217,6 +217,7 @@ def _append_csv_rows(csv_path: Path, rows: List[Dict]):
         "mse",
         "inference_time_sec",
         "num_samples",
+        "num_timesteps",
     ]
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     write_header = (not csv_path.exists()) or csv_path.stat().st_size == 0
@@ -268,6 +269,13 @@ def main():
     if not ckpt_path.exists():
         raise FileNotFoundError(f"Checkpoint not found: {ckpt_path}")
     payload = _torch_load_checkpoint(ckpt_path)
+    if isinstance(dataset, MultiViewCoordDataset):
+        warn_if_multiview_attr_order_mismatch(
+            payload,
+            dataset.view_specs().keys(),
+            context=str(Path(args.config).resolve()),
+            logger_override=logger,
+        )
     model_state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
     model.load_state_dict(model_state, strict=True)
 
@@ -285,6 +293,13 @@ def main():
         name: (
             torch.from_numpy(denorm_stats[name][0]).to(device=device, dtype=torch.float32),
             torch.from_numpy(denorm_stats[name][1]).to(device=device, dtype=torch.float32),
+        )
+        for name in attrs
+    }
+    denorm_stats_np = {
+        name: (
+            denorm_stats_torch[name][0].cpu().numpy()[None, :],
+            denorm_stats_torch[name][1].cpu().numpy()[None, :],
         )
         for name in attrs
     }
@@ -326,8 +341,8 @@ def main():
     timestep_psnrs: Dict[str, List[float]] = {name: [] for name in attrs}
     total_infer_time = 0.0
 
-    for t_idx in timesteps:
-        idxs = timestep_indices[t_idx]
+    for t_order, raw_time in enumerate(timesteps):
+        idxs = timestep_indices[raw_time]
         coords_t = coords_norm[idxs]
         
         pred_map, elapsed = _predict_batch(
@@ -344,29 +359,30 @@ def main():
             pred_flat = pred_map[name]
             pred_np = pred_flat.cpu().numpy()
 
-            mean_t = denorm_stats_torch[name][0]
-            std_t = denorm_stats_torch[name][1]
-            pred_denorm = pred_np * std_t.cpu().numpy()[None, :] + mean_t.cpu().numpy()[None, :]
+            mean_np, std_np = denorm_stats_np[name]
+            pred_denorm = pred_np * std_np + mean_np
 
             gt_flat = gt_data[name][idxs]
             if gt_flat.ndim == 1:
                 gt_flat = gt_flat[:, None]
+            gt_denorm = gt_flat * std_np + mean_np
 
-            if pred_denorm.shape != gt_flat.shape:
+            if pred_denorm.shape != gt_denorm.shape:
                 raise ValueError(
-                    f"Shape mismatch for attr '{name}' at timestep {t_idx}: "
-                    f"pred={pred_denorm.shape}, gt={gt_flat.shape}"
+                    f"Shape mismatch for attr '{name}' at timestep {raw_time}: "
+                    f"pred={pred_denorm.shape}, gt={gt_denorm.shape}"
                 )
 
-            diff = pred_denorm - gt_flat
+            diff = pred_denorm - gt_denorm
             mse = float(np.mean(diff ** 2))
-            gt_min = float(np.min(gt_flat))
-            gt_max = float(np.max(gt_flat))
+            gt_min = float(np.min(gt_denorm))
+            gt_max = float(np.max(gt_denorm))
             psnr = _compute_psnr_from_mse(mse, gt_min, gt_max)
 
             timestep_psnrs[name].append(float(psnr))
             timestep_log_lines.append(
-                f"t={t_idx:04d} attr={name:<12} psnr={float(psnr):>10.6f} mse={float(mse):>12.6e}"
+                f"t_idx={t_order:04d} raw_t={raw_time:>10.6f} attr={name:<12} "
+                f"psnr={float(psnr):>10.6f} mse={float(mse):>12.6e}"
             )
         
         if pbar is not None:

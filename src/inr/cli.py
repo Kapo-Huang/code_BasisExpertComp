@@ -189,7 +189,7 @@ def build_experiment_layout(cfg, model_cfg, data_info, run_timestamp: str):
     # Persist a copy of the launched config for reproducibility.
     cfg_snapshot_payload = dict(cfg)
     cfg_snapshot_payload["run_timestamp"] = run_timestamp
-    cfg_text = yaml.safe_dump(cfg_snapshot_payload)
+    cfg_text = yaml.safe_dump(cfg_snapshot_payload, sort_keys=False)
     cfg_snapshot.write_text(cfg_text, encoding="utf-8")
     # Keep legacy path for downstream scripts that still read configs/config.yaml.
     cfg_snapshot_legacy.write_text(cfg_text, encoding="utf-8")

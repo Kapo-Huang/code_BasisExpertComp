@@ -13,6 +13,7 @@ import torch
 from inr.cli import _resolve_path, build_model, load_config, resolve_data_paths
 from inr.data import MultiViewCoordDataset, NodeDataset
 from inr.utils.logging_utils import setup_logging
+from inr.utils.io import warn_if_multiview_attr_order_mismatch
 
 logger = logging.getLogger(__name__)
 
@@ -512,6 +513,13 @@ def main():
 
     model = build_model(cfg["model"], dataset)
     payload = _torch_load_checkpoint(ckpt_path)
+    if isinstance(dataset, MultiViewCoordDataset):
+        warn_if_multiview_attr_order_mismatch(
+            payload,
+            dataset.view_specs().keys(),
+            context=str(cfg_path),
+            logger_override=logger,
+        )
     model_state = payload["model_state"] if isinstance(payload, dict) and "model_state" in payload else payload
     model.load_state_dict(model_state, strict=True)
 
