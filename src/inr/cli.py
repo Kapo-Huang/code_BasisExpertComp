@@ -248,6 +248,7 @@ def main():
         or data_cfg.get("normalization_stats_path")
     )
     normalize = bool(data_cfg.get("normalize", True))
+    load_into_memory = bool(data_cfg.get("load_into_memory", False))
 
     if data_info.get("attr_paths"):
         t2 = time.perf_counter()
@@ -256,6 +257,7 @@ def main():
             data_info["attr_paths"],
             normalize=normalize,
             stats_path=stats_path,
+            load_into_memory=load_into_memory,
         )
         logger.info("Dataset init (multi-target): %.2fs", time.perf_counter() - t2)
     else:
@@ -265,8 +267,10 @@ def main():
             data_info["y_path"],
             normalize=normalize,
             stats_path=stats_path,
+            load_into_memory=load_into_memory,
         )
         logger.info("Dataset init (single-target): %.2fs", time.perf_counter() - t2)
+    logger.info("Dataset storage: %s", getattr(dataset, "storage_mode", "unknown"))
     logger.info("Dataset size: %s samples", len(dataset))
 
     t3 = time.perf_counter()

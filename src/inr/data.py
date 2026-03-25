@@ -6,6 +6,13 @@ import torch
 from torch.utils.data import Dataset
 
 
+def _load_npy_array(path: str, load_into_memory: bool = False) -> np.ndarray:
+    if load_into_memory:
+        array = np.load(path, allow_pickle=False)
+        return np.array(array, copy=True, order="C")
+    return np.load(path, mmap_mode="r", allow_pickle=False)
+
+
 class NodeDataset(Dataset):
     """
     Loads paired coordinate/target tensors with optional normalization.
@@ -23,19 +30,20 @@ class NodeDataset(Dataset):
         normalize: bool = True,
         stats_path: Optional[str] = None,
         eps: float = 1e-12,
+        load_into_memory: bool = False,
     ):
-        x = np.load(x_path, mmap_mode="r")
-        y = np.load(y_path, mmap_mode="r")
+        x = _load_npy_array(x_path, load_into_memory=load_into_memory)
+        y = _load_npy_array(y_path, load_into_memory=load_into_memory)
         if x.shape[0] != y.shape[0]:
             raise ValueError(f"Mismatched samples: x={x.shape[0]} y={y.shape[0]}")
 
-        # self.x = torch.from_numpy(x.astype(np.float32))
-        # self.y = torch.from_numpy(y.astype(np.float32))
         self.x = torch.from_numpy(x)
         self.y = torch.from_numpy(y)
         self.normalize = normalize
         self.stats_path = stats_path
         self.eps = float(eps)
+        self.load_into_memory = bool(load_into_memory)
+        self.storage_mode = "memory" if self.load_into_memory else "mmap"
 
         if normalize:
             stats_loaded = False
@@ -116,14 +124,15 @@ class MultiViewCoordDataset(Dataset):
         attr_paths: Dict[str, str],
         normalize: bool = True,
         stats_path: Optional[str] = None,
+        load_into_memory: bool = False,
     ):
-        coords = np.load(coords_path, mmap_mode="r")
+        coords = _load_npy_array(coords_path, load_into_memory=load_into_memory)
         if not attr_paths:
             raise ValueError("attr_paths must be a non-empty dict")
 
         attrs = {}
         for name, path in attr_paths.items():
-            data = np.load(path, mmap_mode="r")
+            data = _load_npy_array(path, load_into_memory=load_into_memory)
             if data.shape[0] != coords.shape[0]:
                 raise ValueError(f"Mismatched samples for {name}: {data.shape[0]} vs {coords.shape[0]}")
             attrs[name] = data
@@ -132,6 +141,8 @@ class MultiViewCoordDataset(Dataset):
         self.y = {name: torch.from_numpy(arr) for name, arr in attrs.items()}
         self.normalize = normalize
         self.stats_path = stats_path
+        self.load_into_memory = bool(load_into_memory)
+        self.storage_mode = "memory" if self.load_into_memory else "mmap"
 
         if normalize:
             stats_loaded = False
