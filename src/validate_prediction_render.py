@@ -443,6 +443,36 @@ def ensure_ground_truth_png(
     return gt_png_path, gt_temp_npy
 
 
+def ensure_prediction_png(
+    args: argparse.Namespace,
+    pred_flat: np.ndarray | None,
+    pred_temp_npy: Path,
+    final_pred_png: Path,
+    transfer_function_path: Path,
+    viewport_path: Path,
+    dims_xyz: tuple[int, int, int],
+) -> Path:
+    if final_pred_png.is_file():
+        logger.info("Reusing cached prediction PNG: %s", final_pred_png)
+        return final_pred_png
+
+    if pred_flat is None:
+        raise ValueError(f"Prediction render requested but no prediction array is available for {final_pred_png.name}")
+
+    pred_temp_npy.parent.mkdir(parents=True, exist_ok=True)
+    np.save(pred_temp_npy, pred_flat)
+    pred_rendered_png = run_render_task(
+        args=args,
+        volume_path=pred_temp_npy,
+        transfer_function_path=transfer_function_path,
+        viewport_path=viewport_path,
+        dims_xyz=dims_xyz,
+    )
+    final_pred_png.parent.mkdir(parents=True, exist_ok=True)
+    pred_rendered_png.replace(final_pred_png)
+    return final_pred_png
+
+
 def write_metrics_csv(results: list[dict[str, Any]], csv_path: Path) -> None:
     csv_path.parent.mkdir(parents=True, exist_ok=True)
     fieldnames = [
@@ -479,6 +509,116 @@ def write_metrics_csv(results: list[dict[str, Any]], csv_path: Path) -> None:
                     ),
                 }
             )
+
+
+def parse_optional_float(value: Any) -> float | None:
+    if value is None:
+        return None
+    text = str(value).strip()
+    if not text:
+        return None
+    try:
+        return float(text)
+    except ValueError:
+        return None
+
+
+def load_cached_metric_rows(csv_path: Path, method_name: str, case_name: str) -> dict[int, dict[str, Any]]:
+    if not csv_path.is_file():
+        return {}
+
+    cached_rows: dict[int, dict[str, Any]] = {}
+    with csv_path.open("r", newline="", encoding="utf-8") as handle:
+        reader = csv.DictReader(handle)
+        for raw_row in reader:
+            timestep_text = str(raw_row.get("timestep", "")).strip()
+            if not timestep_text:
+                continue
+            try:
+                timestep = int(timestep_text)
+            except ValueError:
+                logger.warning("Skipping cached metrics row with invalid timestep '%s' in %s", timestep_text, csv_path)
+                continue
+
+            row_method = str(raw_row.get("method", "")).strip()
+            row_case = str(raw_row.get("case", "")).strip()
+            if row_method and row_method != method_name:
+                continue
+            if row_case and row_case != case_name:
+                continue
+
+            cached_rows[timestep] = {
+                "method": row_method or method_name,
+                "case": row_case or case_name,
+                "timestep": timestep,
+                "pred_path": str(raw_row.get("pred_path", "")).strip(),
+                "gt_path": str(raw_row.get("gt_path", "")).strip(),
+                "psnr": parse_optional_float(raw_row.get("psnr")),
+                "ssim": parse_optional_float(raw_row.get("ssim")),
+                "lpips": parse_optional_float(raw_row.get("lpips")),
+                "status": str(raw_row.get("status", "")).strip(),
+                "error": str(raw_row.get("error", "")).strip(),
+                "inference_seconds": parse_optional_float(raw_row.get("inference_seconds")),
+                "cache_hit": True,
+            }
+    return cached_rows
+
+
+def paths_match(cached_path: str, expected_path: Path) -> bool:
+    cached_text = str(cached_path).strip()
+    if not cached_text:
+        return False
+    try:
+        return Path(cached_text).resolve() == expected_path.resolve()
+    except OSError:
+        return False
+
+
+def cached_row_matches_context(
+    cached_row: dict[str, Any] | None,
+    method_name: str,
+    case_name: str,
+    pred_png_path: Path,
+    gt_png_path: Path,
+) -> bool:
+    if not cached_row:
+        return False
+    if cached_row.get("method") != method_name:
+        return False
+    if cached_row.get("case") != case_name:
+        return False
+    if not paths_match(str(cached_row.get("pred_path", "")), pred_png_path):
+        return False
+    if not paths_match(str(cached_row.get("gt_path", "")), gt_png_path):
+        return False
+    return True
+
+
+def has_required_metrics(row: dict[str, Any], require_psnr: bool, require_lpips: bool) -> bool:
+    if row.get("ssim") is None:
+        return False
+    if require_psnr and row.get("psnr") is None:
+        return False
+    if require_lpips and row.get("lpips") is None:
+        return False
+    return True
+
+
+def get_missing_image_metrics(row: dict[str, Any], require_lpips: bool) -> list[str]:
+    metric_names: list[str] = []
+    if row.get("ssim") is None:
+        metric_names.append("ssim")
+    if require_lpips and row.get("lpips") is None:
+        metric_names.append("lpips")
+    return metric_names
+
+
+def get_missing_metrics(row: dict[str, Any], require_psnr: bool, require_lpips: bool) -> list[str]:
+    metric_names: list[str] = []
+    if require_psnr and row.get("psnr") is None:
+        metric_names.append("psnr")
+    metric_names.extend(get_missing_image_metrics(row, require_lpips=require_lpips))
+    return metric_names
 
 
 def summarize_metric(rows: list[dict[str, Any]], key: str) -> dict[str, float] | None:
@@ -524,6 +664,8 @@ def build_summary(
 ) -> dict[str, Any]:
     success_rows = [row for row in results if row.get("status") == "ok"]
     failed_rows = [row for row in results if row.get("status") != "ok"]
+    executed_rows = [row for row in results if row.get("inference_seconds") is not None and not row.get("cache_hit", False)]
+    cache_hits = sum(1 for row in results if row.get("cache_hit", False))
     return {
         "case": case_name,
         "method": method_name,
@@ -536,8 +678,10 @@ def build_summary(
         "psnr": summarize_metric(success_rows, "psnr"),
         "ssim": summarize_metric(success_rows, "ssim"),
         "lpips": summarize_metric(success_rows, "lpips"),
+        "cache_hit_count": int(cache_hits),
+        "executed_inference_count": int(len(executed_rows)),
         "total_inference_seconds": float(total_inference_seconds),
-        "avg_inference_seconds": float(total_inference_seconds / len(results)) if results else 0.0,
+        "avg_inference_seconds": float(total_inference_seconds / len(executed_rows)) if executed_rows else 0.0,
     }
 
 
@@ -669,6 +813,9 @@ def main() -> int:
         logger.info("Target normalization disabled; skipping prediction denormalization for attr=%s", attr_name)
     total_inference_seconds = 0.0
     results: list[dict[str, Any]] = []
+    cached_metric_rows = load_cached_metric_rows(metrics_csv_path, method_name, case_name)
+    if cached_metric_rows:
+        logger.info("Loaded %d cached metric rows from %s", len(cached_metric_rows), metrics_csv_path)
 
     try:
         for t_idx in timesteps:
@@ -690,41 +837,94 @@ def main() -> int:
                 "status": "pending",
                 "error": "",
                 "inference_seconds": None,
+                "cache_hit": False,
             }
+            cached_row = cached_metric_rows.get(int(t_idx))
+            cache_context_matches = cached_row_matches_context(
+                cached_row=cached_row,
+                method_name=method_name,
+                case_name=case_name,
+                pred_png_path=final_pred_png,
+                gt_png_path=gt_png_path,
+            )
+            if cache_context_matches and cached_row is not None:
+                row["psnr"] = cached_row.get("psnr")
+                row["ssim"] = cached_row.get("ssim")
+                row["lpips"] = cached_row.get("lpips")
+
+            if args.gt_render_strategy == "always":
+                row["ssim"] = None
+                if use_lpips:
+                    row["lpips"] = None
+
+            should_skip_timestep = (
+                args.gt_render_strategy != "always"
+                and cache_context_matches
+                and has_required_metrics(
+                    row=row,
+                    require_psnr=gt_metrics_source is not None,
+                    require_lpips=use_lpips,
+                )
+                and final_pred_png.is_file()
+                and gt_png_path.is_file()
+            )
+
+            if should_skip_timestep:
+                cached_result = dict(row)
+                cached_result["status"] = "ok"
+                cached_result["error"] = ""
+                cached_result["cache_hit"] = True
+                if cached_row is not None:
+                    cached_result["inference_seconds"] = cached_row.get("inference_seconds")
+                logger.info(
+                    "Skipping timestep %d because cached metrics and rendered PNGs already exist",
+                    int(t_idx),
+                )
+                results.append(cached_result)
+                continue
 
             logger.info("Processing timestep %d", int(t_idx))
             try:
-                pred_temp_npy.parent.mkdir(parents=True, exist_ok=True)
-                pred_flat, infer_time = _predict_timestep_flat_scalar(
-                    model=model,
-                    dataset=dataset,
-                    attr_name=attr_name,
-                    out_dim=out_dim,
-                    t_idx=int(t_idx),
-                    batch_size=int(args.batch_size),
-                    denorm_mean=denorm_mean,
-                    denorm_std=denorm_std,
-                    device=inference_device,
-                )
-                row["inference_seconds"] = float(infer_time)
-                total_inference_seconds += infer_time
-                np.save(pred_temp_npy, pred_flat)
+                pred_flat: np.ndarray | None = None
+                missing_psnr = gt_metrics_source is not None and row["psnr"] is None
+                needs_prediction = missing_psnr or not final_pred_png.is_file()
+                if needs_prediction:
+                    pred_flat, infer_time = _predict_timestep_flat_scalar(
+                        model=model,
+                        dataset=dataset,
+                        attr_name=attr_name,
+                        out_dim=out_dim,
+                        t_idx=int(t_idx),
+                        batch_size=int(args.batch_size),
+                        denorm_mean=denorm_mean,
+                        denorm_std=denorm_std,
+                        device=inference_device,
+                    )
+                    row["inference_seconds"] = float(infer_time)
+                    total_inference_seconds += infer_time
+                else:
+                    logger.info(
+                        "Skipping prediction inference because cached PNG exists and PSNR is unavailable: %s",
+                        final_pred_png,
+                    )
 
-                if gt_metrics_source is not None:
+                if missing_psnr:
                     stage = "psnr"
+                    if pred_flat is None:
+                        raise RuntimeError(f"Missing prediction array for PSNR at timestep {int(t_idx)}")
                     gt_flat = gt_metrics_source.extract_scalar_timestep(int(t_idx))
                     row["psnr"] = compute_psnr(pred_flat, gt_flat)
 
                 stage = "pred_render"
-                pred_rendered_png = run_render_task(
+                final_pred_png = ensure_prediction_png(
                     args=args,
-                    volume_path=pred_temp_npy,
+                    pred_flat=pred_flat,
+                    pred_temp_npy=pred_temp_npy,
+                    final_pred_png=final_pred_png,
                     transfer_function_path=transfer_function_path,
                     viewport_path=viewport_path,
                     dims_xyz=dims_xyz,
                 )
-                final_pred_png.parent.mkdir(parents=True, exist_ok=True)
-                pred_rendered_png.replace(final_pred_png)
 
                 stage = "gt_render"
                 gt_png_path, gt_temp_npy = ensure_ground_truth_png(
@@ -741,15 +941,32 @@ def main() -> int:
                 )
                 row["gt_path"] = str(gt_png_path)
 
-                stage = "metrics"
-                metrics = validate_image_pair(
-                    str(gt_png_path),
-                    str(final_pred_png),
-                    use_lpips=use_lpips,
-                    device=metrics_device,
-                )
-                row["ssim"] = float(metrics["ssim"])
-                row["lpips"] = None if metrics["lpips"] is None else float(metrics["lpips"])
+                image_metrics_to_compute = get_missing_image_metrics(row, require_lpips=use_lpips)
+                if image_metrics_to_compute:
+                    stage = "metrics"
+                    metrics = validate_image_pair(
+                        str(gt_png_path),
+                        str(final_pred_png),
+                        use_lpips=use_lpips,
+                        device=metrics_device,
+                        requested_metrics=image_metrics_to_compute,
+                    )
+                    if "ssim" in image_metrics_to_compute and metrics["ssim"] is not None:
+                        row["ssim"] = float(metrics["ssim"])
+                    if "lpips" in image_metrics_to_compute:
+                        row["lpips"] = None if metrics["lpips"] is None else float(metrics["lpips"])
+
+                if not has_required_metrics(row, require_psnr=gt_metrics_source is not None, require_lpips=use_lpips):
+                    raise RuntimeError(
+                        "Missing metrics after processing: "
+                        + ", ".join(
+                            get_missing_metrics(
+                                row,
+                                require_psnr=gt_metrics_source is not None,
+                                require_lpips=use_lpips,
+                            )
+                        )
+                    )
                 row["status"] = "ok"
                 logger.info(
                     "t=%d PSNR=%s SSIM=%.6f%s",

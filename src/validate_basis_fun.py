@@ -374,8 +374,67 @@ def _predict_expert_slice_outputs(
     return outputs
 
 
-def _collect_color_range(gt_slices, expert_slices, clip_percentile: float | None):
+def _forward_model_for_attr(model: torch.nn.Module, coords: torch.Tensor, attr_name: str):
+    try:
+        return model(coords, request=attr_name, hard_topk=True)
+    except TypeError:
+        try:
+            return model(coords, hard_topk=True)
+        except TypeError:
+            return model(coords)
+
+
+def _predict_routed_slice_outputs(
+    model,
+    coords_by_plane,
+    shape_by_plane,
+    attr_name: str,
+    channel: int,
+    batch_size: int,
+    device: torch.device,
+    mean: float | None,
+    std: float | None,
+):
+    outputs = {}
+
+    with torch.no_grad():
+        for plane_name, coords in coords_by_plane.items():
+            n_pts = int(coords.shape[0])
+            plane_out = np.empty((n_pts,), dtype=np.float32)
+
+            for start in range(0, n_pts, batch_size):
+                end = min(start + batch_size, n_pts)
+                xb = torch.from_numpy(coords[start:end]).to(device, non_blocking=True)
+                pred = _forward_model_for_attr(model, xb, attr_name)
+
+                if isinstance(pred, dict):
+                    if attr_name not in pred:
+                        raise KeyError(f"Model output missing attr '{attr_name}'. Available: {list(pred.keys())}")
+                    pred_t = pred[attr_name]
+                else:
+                    pred_t = pred
+
+                if pred_t.ndim == 1:
+                    pred_t = pred_t[:, None]
+                if channel < 0 or channel >= int(pred_t.shape[1]):
+                    raise ValueError(
+                        f"--channel out of range for '{attr_name}': {channel}, valid [0, {int(pred_t.shape[1]) - 1}]"
+                    )
+
+                pred_chan = pred_t[:, channel]
+                if mean is not None and std is not None:
+                    pred_chan = pred_chan * std + mean
+
+                plane_out[start:end] = pred_chan.detach().cpu().numpy().astype(np.float32, copy=False)
+
+            shp = tuple(shape_by_plane[plane_name])
+            outputs[plane_name] = plane_out.reshape(shp[0], shp[1])
+    return outputs
+
+
+def _collect_color_range(gt_slices, pred_slices, expert_slices, clip_percentile: float | None):
     arrays = [gt_slices["x"], gt_slices["y"], gt_slices["z"]]
+    arrays.extend([pred_slices["x"], pred_slices["y"], pred_slices["z"]])
     for plane in ("x", "y", "z"):
         arrays.append(expert_slices[plane].reshape(-1))
 
@@ -576,6 +635,17 @@ def process_experiment(
                 mean, std = _resolve_denorm_stats(dataset, checkpoint, attr_name, channel)
 
             gt_slices = _extract_gt_slices(attr_paths[attr_name], info, channel)
+            pred_slices = _predict_routed_slice_outputs(
+                model=model,
+                coords_by_plane=coords,
+                shape_by_plane=shape_by_plane,
+                attr_name=attr_name,
+                channel=channel,
+                batch_size=batch_size,
+                device=device,
+                mean=mean,
+                std=std,
+            )
             expert_slices = _predict_expert_slice_outputs(
                 model=model,
                 coords_by_plane=coords,
@@ -588,7 +658,7 @@ def process_experiment(
                 std=std,
             )
 
-            vmin, vmax = _collect_color_range(gt_slices, expert_slices, clip_percentile)
+            vmin, vmax = _collect_color_range(gt_slices, pred_slices, expert_slices, clip_percentile)
             cmap, vmin, vmax = _choose_cmap(cmap_arg, vmin, vmax)
 
             attr_safe = _safe_name(attr_name)
@@ -599,6 +669,19 @@ def process_experiment(
                 title=f"{exp_name} | {attr_name} | GT | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
                 attr_name=attr_name,
                 subject_name="GT",
+                cmap=cmap,
+                vmin=vmin,
+                vmax=vmax,
+                dpi=dpi,
+            )
+
+            pred_path = timestep_dir / f"{attr_safe}_pred_orth.png"
+            _plot_orthogonal_slices(
+                slices=pred_slices,
+                outpath=pred_path,
+                title=f"{exp_name} | {attr_name} | Prediction | t={info['t']} | (mx,my,mz)=({info['mx']},{info['my']},{info['mz']})",
+                attr_name=attr_name,
+                subject_name="Prediction",
                 cmap=cmap,
                 vmin=vmin,
                 vmax=vmax,
@@ -632,6 +715,7 @@ def process_experiment(
                     "timestep": int(info["t"]),
                     "attr": attr_name,
                     "gt": gt_path,
+                    "pred": pred_path,
                     "experts": expert_paths,
                     "num_experts": num_experts,
                 }
@@ -651,7 +735,7 @@ def process_experiment(
 def main():
     setup_logging()
     parser = argparse.ArgumentParser(
-        description="Visualize per-expert basis outputs as orthogonal center slices on voxel data (router skipped)."
+        description="Visualize per-expert basis outputs and routed predictions as orthogonal center slices on voxel data."
     )
     parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (.pth)")
@@ -729,6 +813,7 @@ def main():
     for item in outputs:
         logger.info("  Attr: %s", item["attr"])
         logger.info("    GT slice image: %s", item["gt"])
+        logger.info("    Prediction slice image: %s", item["pred"])
         logger.info("    Expert images: %s", item["num_experts"])
         for p in item["experts"]:
             logger.info("      %s", p)

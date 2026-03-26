@@ -19,7 +19,6 @@ from inr.cli import build_model
 from inr.datasets.base import (
     compute_input_stats_analytic,
     infer_or_validate_volume_shape,
-    parse_volume_shape,
     peek_array,
     target_dim_from_array,
 )
@@ -117,15 +116,27 @@ def _collect_train_attr_paths(train_dir: Path):
     return paths
 
 
-def _infer_volume_shape(data_cfg, attr_paths):
-    volume_shape = parse_volume_shape(data_cfg.get("volume_shape") or data_cfg.get("volume_dims"))
-    if volume_shape is not None:
-        return volume_shape
+def _filter_attr_paths_by_shape(attr_paths, volume_shape):
+    if volume_shape is None:
+        return dict(attr_paths), {}
 
+    kept = {}
+    dropped = {}
+    for name, path in attr_paths.items():
+        try:
+            arr = peek_array(path)
+            infer_or_validate_volume_shape(arr, volume_shape)
+            kept[name] = path
+        except Exception as exc:
+            dropped[name] = str(exc)
+    return kept, dropped
+
+
+def _infer_volume_shape(data_cfg, attr_paths):
+    volume_shape = data_cfg.get("volume_shape") or data_cfg.get("volume_dims")
     first_path = next(iter(attr_paths.values()))
     first = peek_array(first_path)
-    inferred = infer_or_validate_volume_shape(first, None)
-    return inferred
+    return infer_or_validate_volume_shape(first, volume_shape)
 
 
 def _build_view_specs(attr_paths, volume_shape):
@@ -730,6 +741,14 @@ def _build_model_and_inputs(cfg, checkpoint, train_dir: Path):
     model_cfg = cfg["model"]
 
     attr_paths = _collect_train_attr_paths(train_dir)
+    attr_paths, dropped = _filter_attr_paths_by_shape(
+        attr_paths,
+        data_cfg.get("volume_shape") or data_cfg.get("volume_dims"),
+    )
+    if dropped:
+        logger.warning("Dropped by shape mismatch: %s", sorted(dropped.keys()))
+    if not attr_paths:
+        raise ValueError("No valid train attr_paths after volume shape filtering.")
     volume_shape = _infer_volume_shape(data_cfg, attr_paths)
     view_specs = _build_view_specs(attr_paths, volume_shape)
 
@@ -747,6 +766,18 @@ def _resolve_run_name(cfg, config_path: Path, run_timestamp: str):
     exp_id = str(cfg.get("exp_id", "")).strip()
     base = exp_id if exp_id else config_path.stem
     return f"{_safe_name(base)}_{run_timestamp}"
+
+
+def _resolve_output_dir(
+    outdir: Path,
+    task: str,
+    slice_info: dict | None,
+):
+    if task == "time-curves":
+        return outdir / "time_curves"
+    if slice_info is None:
+        raise ValueError("slice_info is required for slices/all tasks.")
+    return outdir / str(int(slice_info["t"]))
 
 
 def extract_router_distribution(
@@ -835,19 +866,7 @@ def extract_router_distribution(
     attr_to_idx = {name: i for i, name in enumerate(selected_attrs)}
 
     palette_hex = _build_palette(num_experts)
-    if task == "time-curves":
-        run_tag = f"router_time_ts{run_timestamp}"
-    elif task == "all":
-        run_tag = (
-            f"router_all_t{int(time_index):03d}_top{int(top_k)}_ts{run_timestamp}"
-            f"_mx{int(slice_info['mx'])}_my{int(slice_info['my'])}_mz{int(slice_info['mz'])}"
-        )
-    else:
-        run_tag = (
-            f"router_t{int(time_index):03d}_top{int(top_k)}_ts{run_timestamp}"
-            f"_mx{int(slice_info['mx'])}_my{int(slice_info['my'])}_mz{int(slice_info['mz'])}"
-        )
-    run_dir = outdir / exp_name / run_tag
+    run_dir = _resolve_output_dir(outdir=outdir, task=task, slice_info=slice_info)
     run_dir.mkdir(parents=True, exist_ok=True)
 
     outputs = []
@@ -1036,7 +1055,12 @@ def main():
     )
     parser.add_argument("--config", type=str, required=True, help="Path to config yaml")
     parser.add_argument("--checkpoint", type=str, required=True, help="Path to checkpoint (.pth)")
-    parser.add_argument("--outdir", type=str, default="validate_out", help="output directory")
+    parser.add_argument(
+        "--outdir",
+        type=str,
+        default="validate_out",
+        help="base output directory; slices/all write to outdir/<time-index>, time-curves write to outdir/time_curves",
+    )
     parser.add_argument("--attr", type=str, default=None, help="single attr or comma list; default=all attrs")
     parser.add_argument(
         "--task",
@@ -1045,7 +1069,7 @@ def main():
         choices=["slices", "time-curves", "all"],
         help="slices: only spatial top-k/coverage/entropy; time-curves: only per-expert curves over time; all: generate both",
     )
-    parser.add_argument("--time-index", type=int, default=0, help="time index t (only used for task=slices/all)")
+    parser.add_argument("--timestamp", type=int, default=0, help="time index t (only used for task=slices/all)")
     parser.add_argument("--top-k", type=int, default=None, help="top-k rank count to visualize; default=model top_k")
     parser.add_argument("--batch-size", type=int, default=65536, help="inference batch size")
     parser.add_argument("--device", type=str, default=None, help="force device, e.g., cpu/cuda:0")
@@ -1111,7 +1135,7 @@ def main():
             outdir=outdir,
             run_timestamp=run_timestamp,
             attr_arg=args.attr,
-            time_index=int(args.time_index),
+            time_index=int(args.timestamp),
             task=str(args.task),
             top_k_override=args.top_k,
             batch_size=int(args.batch_size),
