@@ -17,7 +17,7 @@ for path in (str(THIS_DIR.parent), str(THIS_DIR.parent.parent)):
 
 from mesh.common import NEURAL_EXPERTS_ROOT, dump_config, ensure_sys_path, load_config, load_state_dict_payload, to_device
 
-from datasets import build_dataloader
+from datasets_loader import build_dataloader
 from models import build_model
 from models.stage_handler import TrainingStageHandler
 import utils.utils as utils
