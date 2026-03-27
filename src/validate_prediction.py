@@ -373,10 +373,19 @@ def main():
     outdir.mkdir(parents=True, exist_ok=True)
     pbar = _tqdm(total=len(timesteps), desc="predict_export", leave=True) if _tqdm is not None else None
 
+    if bool(getattr(dataset, "normalize_targets", False)):
+        mean_arr, std_arr = _resolve_attr_stats(dataset, payload, attr_name, out_dim)
+        denorm_mean = torch.as_tensor(mean_arr, device=device, dtype=torch.float32)
+        denorm_std = torch.as_tensor(std_arr, device=device, dtype=torch.float32)
+        logger.info("Applying target denormalization for attr=%s", attr_name)
+    else:
+        denorm_mean = torch.zeros(out_dim, device=device)
+        denorm_std = torch.ones(out_dim, device=device)
+        logger.info("Target normalization disabled; skipping prediction denormalization for attr=%s", attr_name)
+
     total_infer_time = 0.0
     
     for t_idx in timesteps:
-        # 直接推理，无需反标准化
         pred_flat, infer_time = _predict_timestep_flat_scalar(
             model=model,
             dataset=dataset,
@@ -384,8 +393,8 @@ def main():
             out_dim=out_dim,
             t_idx=int(t_idx),
             batch_size=int(args.batch_size),
-            denorm_mean=torch.zeros(out_dim, device=device),  # 不做反标准化
-            denorm_std=torch.ones(out_dim, device=device),    # 不做反标准化
+            denorm_mean=denorm_mean,
+            denorm_std=denorm_std,
             device=device,
         )
         

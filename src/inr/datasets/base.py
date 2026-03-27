@@ -57,9 +57,76 @@ def resolve_normalization_scheme(scheme: str | None) -> str:
     return aliases[normalized]
 
 
+def _coerce_stats_array(value) -> np.ndarray | None:
+    if value is None or isinstance(value, dict):
+        return None
+    arr = np.asarray(value, dtype=np.float64).reshape(-1)
+    if arr.size == 0 or not np.all(np.isfinite(arr)):
+        return None
+    return arr
+
+
+def _infer_volume_shape_from_x_mean(x_mean: np.ndarray | None) -> VolumeShape | None:
+    if x_mean is None or x_mean.size != 4:
+        return None
+
+    dims: list[int] = []
+    for mean in x_mean:
+        n = int(round(float(mean) * 2.0 + 1.0))
+        if n <= 0:
+            return None
+        expected_mean = (float(n) - 1.0) / 2.0
+        if abs(float(mean) - expected_mean) > 1e-3:
+            return None
+        dims.append(n)
+
+    return VolumeShape(X=dims[0], Y=dims[1], Z=dims[2], T=dims[3])
+
+
+def _infer_normalization_scheme_from_input_stats(payload) -> str | None:
+    if not isinstance(payload, dict):
+        return None
+
+    x_mean = _coerce_stats_array(payload.get("x_mean"))
+    x_std = _coerce_stats_array(payload.get("x_std"))
+    if x_mean is None or x_std is None or x_std.size != 4:
+        return None
+
+    volume_shape = _infer_volume_shape_from_x_mean(x_mean)
+    if volume_shape is None:
+        return None
+
+    best_scheme = None
+    best_error = np.inf
+    for scheme in (NORMALIZATION_SCHEME_Z_SCORE, NORMALIZATION_SCHEME_MINMAX_NEG1_POS1):
+        _, expected_std = compute_input_stats_analytic(
+            volume_shape,
+            unbiased=True,
+            dtype=np.float64,
+            eps=1e-12,
+            normalization_scheme=scheme,
+        )
+        expected = expected_std.numpy().reshape(-1).astype(np.float64, copy=False)
+        rel_error = np.max(np.abs(x_std - expected) / np.maximum(np.abs(expected), 1e-12))
+        if rel_error < best_error:
+            best_error = rel_error
+            best_scheme = scheme
+
+    if best_error <= 1e-3:
+        return best_scheme
+    return None
+
+
 def resolve_checkpoint_normalization_scheme(payload) -> str:
     raw = payload.get("normalization_scheme") if isinstance(payload, dict) else None
-    return resolve_normalization_scheme(raw)
+    if raw is not None:
+        return resolve_normalization_scheme(raw)
+
+    inferred = _infer_normalization_scheme_from_input_stats(payload)
+    if inferred is not None:
+        return inferred
+
+    return DEFAULT_NORMALIZATION_SCHEME
 
 
 def target_dim_from_array(arr: np.ndarray) -> int:
