@@ -1,97 +1,76 @@
-# TTHRESH CLI 压缩工具
+# TTHRESH PSNR Wrapper
 
-## 1. 编译 TTHRESH
+This wrapper keeps the native `tthresh` binary unchanged and exposes the same PSNR-only interface as the SZ3 and ZFP wrappers.
 
-在 `src` 目录下，进入 `tthresh` 源码目录并执行以下命令：
+## Build
 
 ```bash
 cd tthresh
-rm -rf build
 mkdir build
 cd build
-cmake .. 
-make -j
+cmake ..
+cmake --build . --config Release
 ```
 
-> **⚠️ 常见问题 (Troubleshooting):**
-> 如果运行 `cmake ..` 时发生报错，通常是由于 CMake 版本策略引起的。请尝试加上版本最低要求参数重新配置：
-> ```bash
-> cmake .. -DCMAKE_POLICY_VERSION_MINIMUM=3.5
-> ```
+Expected binary path:
 
-编译完成后，回到 `tthresh` 根目录：
-
-```bash
-cd ..
+```text
+build/tthresh
 ```
 
----
+## Config
 
-## 2. 安装依赖
-
-请确保你的 Python 环境已安装以下依赖包：
-
-```bash
-pip install numpy pyyaml
-```
-
----
-
-## 3. 配置文件 (YAML)
-
-在运行前编写 YAML 配置文件。psnr越小，压缩率越高。通过调节psnr，控制压缩率
-
-**示例：** `configs/volRendering_H2.yaml`
+Required keys:
 
 ```yaml
-input: data/volRendering_datasets/volRendering_H2.npy
+input: ../path/to/volRendering_H2.npy
 tthresh: build/tthresh
-psnr: 40
+psnr: 40.0
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.tthresh
 recon: outputs/volRendering_H2_recon.npy
 result_json: outputs/volRendering_H2_result.json
 ```
-*(注：这里的 `input` 使用了相对路径引用了 SZ3 目录下的测试数据，请确保该路径下的数据真实存在。)*
 
----
+Notes:
 
-## 4. 运行测试
+- External PSNR is always `20 * log10((max(original) - min(original)) / rmse)`.
+- TTHRESH uses a native PSNR definition with an extra `/ 2` term in the denominator, so the wrapper converts:
+  `native_psnr = target_psnr - 20 * log10(2)`.
+- TTHRESH requires at least 3 dimensions after reshape.
+- Supported dtypes are `uint8`, `uint16`, `int32`, `float32`, and `float64`.
 
-在主目录下，运行 Python 脚本并指定配置文件：
+## Run
 
 ```bash
-python3 tthresh_cli.py --config configs/volRendering_H2.yaml
+python tthresh_cli.py --config configs/volRendering_H2.yaml
 ```
 
----
-
-## 5. 输出结果
-
-**示例：**
+## Result Schema
 
 ```json
 {
-  "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh",
-  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2_recon.npy",
-  "loaded_shape": [
-    36902400
-  ],
-  "used_shape": [
-    600,
-    248,
-    248
-  ],
+  "method": "tthresh",
+  "input": "/abs/path/input.npy",
+  "compressed": "/abs/path/output.tthresh",
+  "recon": "/abs/path/recon.npy",
+  "loaded_shape": [36902400],
+  "used_shape": [600, 248, 248],
   "dtype": "float32",
-  "psnr": 40.0,
-  "stdout": "oldbits = 1180876800, newbits = 438608, compressionratio = 2692.33, bpv = 0.0118856\neps = 0.0101889, rmse = 0.0101154, psnr = 39.9003"
+  "target_psnr": 40.0,
+  "native_mode": "psnr",
+  "native_value": 33.979400086720375,
+  "measured_psnr": 39.90,
+  "mse": 0.00010,
+  "rmse": 0.01011,
+  "max_error": 0.082,
+  "original_nbytes": 147609600,
+  "compressed_nbytes": 54826,
+  "compression_ratio": 2692.32845730128,
+  "compress_stdout": "oldbits = ...",
+  "compress_stderr": "",
+  "decompress_stdout": "",
+  "decompress_stderr": ""
 }
 ```
-
-执行完毕后，所有生成的文件将保存在 `outputs/` 目录中：
-
-* `volRendering_H2.tthresh`：TTHRESH 压缩后的文件。
-* `volRendering_H2_recon.npy`：解压并重建后的 NumPy 数组数据。
-* `volRendering_H2_result.json`：包含压缩耗时、PSNR 以及其他误差指标的测试结果。
-

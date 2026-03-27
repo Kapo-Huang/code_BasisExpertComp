@@ -1,56 +1,31 @@
-# SZ3 CLI 压缩工具指南
+# SZ3 PSNR Wrapper
 
-在 WSL 环境下编译 SZ3。
+This wrapper keeps the native `sz3` binary unchanged and exposes a PSNR-only YAML interface.
 
-## 1. 环境与依赖
-
-首先，进入 **WSL 环境**。
-
-**安装 Python 依赖：**
-
-```bash
-pip install numpy pyyaml
-```
-
----
-
-## 2. 编译 SZ3
-
-在 `src` 目录下，进入 `SZ3` 源码目录并执行以下命令进行编译：
+## Build
 
 ```bash
 cd SZ3
-rm -rf build
 mkdir build
 cd build
 cmake ..
-make -j
+cmake --build . --config Release
 ```
 
-> **⚠️ 常见问题 (Troubleshooting):**
-> 如果在 `cmake` 或编译过程中卡住或报错，通常是因为缺少系统级依赖。请执行以下命令安装后重新尝试编译：
-> ```bash
-> sudo apt update
-> sudo apt install -y pkg-config libzstd-dev
-> ```
+Expected binary path:
 
-编译完成后，回到 SZ3 根目录：
-```bash
-cd ..
+```text
+build/tools/sz3/sz3
 ```
 
----
+## Config
 
-## 3. 配置文件 (YAML)
-
-运行脚本前，需要准备 YAML 配置文件。注意：cr参数是压缩率可自行调节
-
-**示例：** `configs/volRendering_H2.yaml`
+Required keys:
 
 ```yaml
-input: data/volRendering_datasets/volRendering_H2.npy
+input: ../path/to/volRendering_H2.npy
 sz3: build/tools/sz3/sz3
-cr: 10000
+psnr: 40.0
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.sz3pkg
@@ -58,40 +33,45 @@ recon: outputs/volRendering_H2_recon.npy
 result_json: outputs/volRendering_H2_result.json
 ```
 
----
+Notes:
 
-## 4. 运行测试
+- `psnr` always means `20 * log10((max(original) - min(original)) / rmse)`.
+- The wrapper calls SZ3 in native PSNR mode: `-M PSNR <psnr>`.
+- `.sz3pkg` stores the native `.sz` payload plus wrapper metadata.
+- Legacy `cr` is no longer accepted.
 
-在主目录下，通过 Python 调用 CLI 脚本并传入配置文件：
+## Run
 
 ```bash
-python3 sz3_cli.py --config configs/volRendering_H2.yaml
+python sz3_cli.py --config configs/volRendering_H2.yaml
 ```
 
----
+## Result Schema
 
-## 5. 输出结果
-**示例：**
+`result_json` and stdout use the same fields:
 
 ```json
 {
-  "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2.sz3pkg",
-  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2_recon.npy",
-  "loaded_shape": [
-    36902400
-  ],
-  "shape": [
-    600,
-    248,
-    248
-  ],
-  "target_cr": 10000.0,
-  "actual_cr": 10025.782788833798,
-  "used_error_bound": 0.5364989910958684
+  "method": "sz3",
+  "input": "/abs/path/input.npy",
+  "compressed": "/abs/path/output.sz3pkg",
+  "recon": "/abs/path/recon.npy",
+  "loaded_shape": [36902400],
+  "used_shape": [600, 248, 248],
+  "dtype": "float32",
+  "target_psnr": 40.0,
+  "native_mode": "psnr",
+  "native_value": 40.0,
+  "measured_psnr": 39.98,
+  "mse": 0.00012,
+  "rmse": 0.01095,
+  "max_error": 0.083,
+  "original_nbytes": 147609600,
+  "compressed_nbytes": 15353,
+  "compression_ratio": 9614.38155409366,
+  "compress_stdout": "",
+  "compress_stderr": "",
+  "decompress_stdout": "",
+  "decompress_stderr": ""
 }
 ```
-运行结束后，生成的文件将保存在 `outputs/` 目录中：
-
-* `volRendering_H2.sz3pkg`：SZ3 压缩后的二进制数据包。
-* `volRendering_H2_recon.npy`：解压重建后的 numpy 数组数据。
-* `volRendering_H2_result.json`：包含压缩率、PSNR、MSE 等评估指标的测试结果。
