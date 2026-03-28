@@ -43,14 +43,39 @@ cd ..
 
 ## 3. 配置文件 (YAML)
 
-运行脚本前，需要准备 YAML 配置文件。注意：cr参数是压缩率可自行调节
+运行脚本前，需要准备 YAML 配置文件。
+
+参数说明：
+SZ3 支持 ABS / REL / PSNR 这三种误差参数
+1. ABS ：控制点对点绝对误差。
+也就是每个重建值和原值的差，按绝对值看，不能超过你给的阈值。
+
+2. REL ：value-range-based relative error，也就是误差阈值按全局数据范围来定：
+有效绝对误差 = relative × (max - min)。
+例如：
+数据范围是 [100, 110]，range = 10
+REL = 0.01
+那有效的绝对误差其实就是 0.1
+
+3. PSNR
+PSNR 控制的是整体失真质量，衡量的是 overall data distortion，而不是 maximum error。
+适合更关心整体质量
+
+具体参数：
+- metric: ABS
+- metric: REL
+- metric: PSNR
+搭配
+- metric_value: ...
+
 
 **示例：** `configs/volRendering_H2.yaml`
 
 ```yaml
 input: data/volRendering_datasets/volRendering_H2.npy
 sz3: build/tools/sz3/sz3
-cr: 10000
+metric: ABS
+metric_value: 1e-4
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.sz3pkg
@@ -64,8 +89,13 @@ result_json: outputs/volRendering_H2_result.json
 
 在主目录下，通过 Python 调用 CLI 脚本并传入配置文件：
 
+压缩：
 ```bash
-python3 sz3_cli.py --config configs/volRendering_H2.yaml
+python3 sz3_cli.py --config configs/volRendering_H2.yaml --mode compress
+```
+解压：
+```bash
+python3 sz3_cli.py --config configs/volRendering_H2.yaml --mode decompress
 ```
 
 ---
@@ -74,9 +104,19 @@ python3 sz3_cli.py --config configs/volRendering_H2.yaml
 **示例：**
 
 ```json
+[16:42:12] 开始读取原始数据: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/data/volRendering_datasets/volRendering_H2.npy (140.77 MiB)
+[16:42:13] 读取完成: shape=(36902400,), dtype=float32
+[16:42:13] 准备压缩: used_shape=(600, 248, 248), dtype=float32, 原始大小=147609600 bytes
+[16:42:13] 写入临时 raw 输入文件
+[16:42:13] 临时 raw 输入文件写入完成
+[16:42:13] 调用 SZ3 压缩 (metric=ABS, value=0.0001)
+[16:42:14] 完成: 调用 SZ3 压缩 (metric=ABS, value=0.0001) (耗时 0.81s)
+[16:42:14] 压缩完成: compressed=3511644 bytes, actual_cr=42.0343
+[16:42:14] 写出压缩归档: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2.sz3pkg
+[16:42:15] 压缩归档写出完成
 {
+  "mode": "compress",
   "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2.sz3pkg",
-  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2_recon.npy",
   "loaded_shape": [
     36902400
   ],
@@ -85,11 +125,36 @@ python3 sz3_cli.py --config configs/volRendering_H2.yaml
     248,
     248
   ],
-  "target_cr": 10000.0,
-  "actual_cr": 10025.782788833798,
-  "used_error_bound": 0.5364989910958684
+  "dtype": "float32",
+  "metric": "ABS",
+  "metric_value": 0.0001,
+  "actual_cr": 42.03432922016013
 }
 ```
+
+```json
+[16:44:07] 开始读取压缩文件: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2.sz3pkg (3.35 MiB)
+[16:44:07] 解压参数: shape=(600, 248, 248), dtype=float32, dtype_flag=-f
+[16:44:07] 调用 SZ3 解压
+[16:44:07] 完成: 调用 SZ3 解压 (耗时 0.41s)
+[16:44:07] 读取重建 raw 并保存为 npy
+[16:44:09] 重建文件已保存: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2_recon.npy
+{
+  "mode": "decompress",
+  "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2.sz3pkg",
+  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/SZ3/outputs/volRendering_H2_recon.npy",
+  "shape": [
+    600,
+    248,
+    248
+  ],
+  "dtype": "float32",
+  "metric": "ABS",
+  "metric_value": 0.0001,
+  "actual_cr": 42.03432922016013
+}
+```
+
 运行结束后，生成的文件将保存在 `outputs/` 目录中：
 
 * `volRendering_H2.sz3pkg`：SZ3 压缩后的二进制数据包。

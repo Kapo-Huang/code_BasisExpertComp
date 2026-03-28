@@ -60,11 +60,14 @@ result_json: outputs/volRendering_H2_result.json
 ## 4. 运行测试
 
 在主目录下，运行 Python 脚本并指定配置文件：
-
+压缩：
 ```bash
-python3 tthresh_cli.py --config configs/volRendering_H2.yaml
+python3 tthresh_cli.py --config configs/volRendering_H2.yaml --mode compress
 ```
-
+解压：
+```bash
+python3 tthresh_cli.py --config configs/volRendering_H2.yaml --mode decompress
+```
 ---
 
 ## 5. 输出结果
@@ -72,22 +75,51 @@ python3 tthresh_cli.py --config configs/volRendering_H2.yaml
 **示例：**
 
 ```json
+[16:51:54] 开始读取原始数据: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/data/volRendering_datasets/volRendering_H2.npy (140.77 MiB)
+[16:51:56] 读取完成: shape=(36902400,), dtype=float32
+[16:51:56] 准备压缩: used_shape=(600, 248, 248), dtype=float32, psnr=40.0
+[16:51:56] 写入临时 raw 输入文件
+[16:51:56] 临时 raw 输入文件写入完成
+[16:51:56] 调用 TTHRESH 压缩
+[16:52:03] 完成: 调用 TTHRESH 压缩 (耗时 7.53s)
+[16:52:03] 写出压缩归档: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh
+[16:52:03] 压缩归档写出完成
 {
+  "mode": "compress",
   "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh",
-  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2_recon.npy",
   "loaded_shape": [
     36902400
   ],
-  "used_shape": [
+  "shape": [
     600,
     248,
     248
   ],
   "dtype": "float32",
-  "psnr": 40.0,
-  "stdout": "oldbits = 1180876800, newbits = 438608, compressionratio = 2692.33, bpv = 0.0118856\neps = 0.0101889, rmse = 0.0101154, psnr = 39.9003"
+  "psnr": 40.0
 }
 ```
+
+```json
+[16:52:47] 开始读取压缩文件: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh (0.05 MiB)
+[16:52:47] 调用 TTHRESH 解压
+[16:52:49] 完成: 调用 TTHRESH 解压 (耗时 1.60s)
+[16:52:49] 读取重建 raw 并保存为 npy
+[16:52:50] 重建文件已保存: /mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2_recon.npy
+{
+  "mode": "decompress",
+  "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh",
+  "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2_recon.npy",
+  "shape": [
+    600,
+    248,
+    248
+  ],
+  "dtype": "float32",
+  "psnr": 40.0
+}
+```
+
 
 执行完毕后，所有生成的文件将保存在 `outputs/` 目录中：
 

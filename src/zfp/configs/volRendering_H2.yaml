@@ -1,6 +1,6 @@
 input: data/volRendering_datasets/volRendering_H2.npy
 zfp: build/bin/zfp
-rate: 4
+rate: 0.0001
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.zfp

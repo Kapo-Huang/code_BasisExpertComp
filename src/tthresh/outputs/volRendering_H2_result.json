@@ -1,15 +1,12 @@
 {
+  "mode": "decompress",
   "compressed": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2.tthresh",
   "recon": "/mnt/d/Lab/data_compression/code_BasisExpertComp/src/tthresh/outputs/volRendering_H2_recon.npy",
-  "loaded_shape": [
-    36902400
-  ],
-  "used_shape": [
+  "shape": [
     600,
     248,
     248
   ],
   "dtype": "float32",
-  "psnr": 40.0,
-  "stdout": "oldbits = 1180876800, newbits = 438608, compressionratio = 2692.33, bpv = 0.0118856\neps = 0.0101889, rmse = 0.0101154, psnr = 39.9003"
+  "psnr": 40.0
 }
