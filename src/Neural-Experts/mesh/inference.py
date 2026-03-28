@@ -91,6 +91,19 @@ def unwrap_model_state(payload: Any) -> dict[str, Any]:
 
 
 def resolve_checkpoint_stats(payload: Any, cfg: dict[str, Any]) -> tuple[np.ndarray, np.ndarray, np.ndarray, np.ndarray]:
+    normalize_inputs = bool(cfg["DATA"].get("normalize_inputs", False))
+    normalize_targets = bool(cfg["DATA"].get("normalize_targets", False))
+    input_dim = int(cfg["MODEL"]["in_dim"])
+    target_dim = int(cfg["MODEL"]["out_dim"])
+
+    if not normalize_inputs and not normalize_targets:
+        return (
+            np.zeros((1, input_dim), dtype=np.float32),
+            np.ones((1, input_dim), dtype=np.float32),
+            np.zeros((1, target_dim), dtype=np.float32),
+            np.ones((1, target_dim), dtype=np.float32),
+        )
+
     if isinstance(payload, dict):
         x_mean = payload.get("x_mean")
         x_std = payload.get("x_std")
@@ -104,7 +117,7 @@ def resolve_checkpoint_stats(payload: Any, cfg: dict[str, Any]) -> tuple[np.ndar
                 np.asarray(y_std, dtype=np.float32).reshape(1, -1),
             )
 
-    from datasets.Mesh import _ensure_2d, _load_or_compute_stats
+    from datasets_loader.Mesh import _ensure_2d, _load_or_compute_stats
 
     source = np.load(cfg["DATA"]["source_path"], mmap_mode="r")
     target = _ensure_2d(np.load(cfg["DATA"]["target_path"], mmap_mode="r"))
@@ -116,6 +129,8 @@ def resolve_checkpoint_stats(payload: Any, cfg: dict[str, Any]) -> tuple[np.ndar
         stats_key=str(cfg["DATA"]["stats_key"]),
         input_dim=int(source.shape[1]),
         target_dim=int(target.shape[1]),
+        load_input_stats=normalize_inputs,
+        load_target_stats=normalize_targets,
     )
     return x_mean.numpy(), x_std.numpy(), y_mean.numpy(), y_std.numpy()
 

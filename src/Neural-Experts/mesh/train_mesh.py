@@ -5,15 +5,21 @@ import shutil
 import sys
 from pathlib import Path
 
+THIS_DIR = Path(__file__).resolve().parent
+for path in (str(THIS_DIR.parent), str(THIS_DIR.parent.parent)):
+    if path not in sys.path:
+        sys.path.insert(0, path)
+
+from runtime_limits import apply_runtime_thread_limits, configure_threading_env
+
+configure_threading_env()
+
 import numpy as np
 import torch
 import torch.nn.utils as nn_utils
 import torch.optim as optim
 
-THIS_DIR = Path(__file__).resolve().parent
-for path in (str(THIS_DIR.parent), str(THIS_DIR.parent.parent)):
-    if path not in sys.path:
-        sys.path.insert(0, path)
+THREAD_LIMITS = apply_runtime_thread_limits()
 
 from mesh.common import NEURAL_EXPERTS_ROOT, dump_config, ensure_sys_path, load_config, load_state_dict_payload, to_device
 
@@ -164,6 +170,7 @@ def main(args):
     log_file = open(run_dir / "out.log", "w", encoding="utf-8")
     print(args)
     print("torch version: ", torch.__version__)
+    print(f"thread limits: intra_op={THREAD_LIMITS[0]}, inter_op={THREAD_LIMITS[1]}")
 
     device = torch.device("cuda:" + str(args.gpu) if torch.cuda.is_available() else "cpu")
     cfg["device"] = device
@@ -182,6 +189,10 @@ def main(args):
     utils.log_string(
         f"Model size assuming float32 parameters: {_format_size_bytes(model_size_bytes)} "
         f"(total parameters: {total_parameters})",
+        log_file,
+    )
+    utils.log_string(
+        f"Thread limits active: intra_op={THREAD_LIMITS[0]}, inter_op={THREAD_LIMITS[1]}",
         log_file,
     )
 

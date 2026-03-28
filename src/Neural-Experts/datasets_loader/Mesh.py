@@ -4,10 +4,16 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from runtime_limits import apply_runtime_thread_limits, configure_threading_env
+
+configure_threading_env()
+
 import numpy as np
 import torch
 from sklearn.cluster import MiniBatchKMeans
 from torch.utils.data import Dataset
+
+apply_runtime_thread_limits()
 
 
 def _ensure_2d(arr: np.ndarray) -> np.ndarray:
@@ -57,6 +63,11 @@ def _validate_stats_dims(name: str, value: np.ndarray, expected_dim: int) -> np.
     return array
 
 
+def _identity_stats(dim: int) -> tuple[np.ndarray, np.ndarray]:
+    dim = int(dim)
+    return np.zeros((1, dim), dtype=np.float32), np.ones((1, dim), dtype=np.float32)
+
+
 def _load_or_compute_stats(
     source: np.ndarray,
     target: np.ndarray,
@@ -64,37 +75,43 @@ def _load_or_compute_stats(
     stats_key: str,
     input_dim: int,
     target_dim: int,
+    load_input_stats: bool = True,
+    load_target_stats: bool = True,
 ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
     stats = _load_npz_stats(stats_path)
     x_mean = x_std = y_mean = y_std = None
 
-    if "x_mean" in stats and "x_std" in stats:
+    if load_input_stats and "x_mean" in stats and "x_std" in stats:
         x_mean = _validate_stats_dims("x_mean", stats["x_mean"], input_dim)
         x_std = _validate_stats_dims("x_std", stats["x_std"], input_dim)
 
-    if "y_mean" in stats and "y_std" in stats:
+    if load_target_stats and "y_mean" in stats and "y_std" in stats:
         y_mean = _validate_stats_dims("y_mean", stats["y_mean"], target_dim)
         y_std = _validate_stats_dims("y_std", stats["y_std"], target_dim)
 
     stats_y_mean_key = f"y_mean_{stats_key}"
     stats_y_std_key = f"y_std_{stats_key}"
-    if y_mean is None and stats_y_mean_key in stats and stats_y_std_key in stats:
+    if load_target_stats and y_mean is None and stats_y_mean_key in stats and stats_y_std_key in stats:
         y_mean = _validate_stats_dims(stats_y_mean_key, stats[stats_y_mean_key], target_dim)
         y_std = _validate_stats_dims(stats_y_std_key, stats[stats_y_std_key], target_dim)
 
-    if y_mean is None and "mean" in stats and "std" in stats:
+    if load_target_stats and y_mean is None and "mean" in stats and "std" in stats:
         y_mean = _validate_stats_dims("mean", stats["mean"], target_dim)
         y_std = _validate_stats_dims("std", stats["std"], target_dim)
 
-    if x_mean is None or x_std is None:
+    if not load_input_stats:
+        x_mean, x_std = _identity_stats(input_dim)
+    elif x_mean is None or x_std is None:
         x_mean, x_std = _compute_stats_streaming(source)
-    if y_mean is None or y_std is None:
+    if not load_target_stats:
+        y_mean, y_std = _identity_stats(target_dim)
+    elif y_mean is None or y_std is None:
         y_mean, y_std = _compute_stats_streaming(target)
 
     x_std = np.maximum(x_std, 1.0e-12).astype(np.float32)
     y_std = np.maximum(y_std, 1.0e-12).astype(np.float32)
 
-    if stats_path is not None and not stats_path.exists():
+    if stats_path is not None and not stats_path.exists() and (load_input_stats or load_target_stats):
         stats_path.parent.mkdir(parents=True, exist_ok=True)
         np.savez(
             str(stats_path),
@@ -232,8 +249,10 @@ class MeshAttributeDataset(Dataset):
 
         self.n_points = int(train_cfg["n_points"])
         self.segmentation_mode = bool(train_cfg.get("segmentation_mode", False))
-        self.normalize_inputs = bool(data_cfg.get("normalize_inputs", True))
+        self.normalize_inputs = bool(data_cfg.get("normalize_inputs", False))
         self.normalize_targets = bool(data_cfg.get("normalize_targets", False))
+        pretrain_cfg = train_cfg.get("pretrain_assignment", {}) or {}
+        self.assignment_normalize_features = bool(pretrain_cfg.get("normalize_features", self.normalize_inputs))
 
         self.source = np.load(str(self.source_path), mmap_mode="r")
         self.target = np.load(str(self.target_path), mmap_mode="r")
@@ -265,6 +284,8 @@ class MeshAttributeDataset(Dataset):
             stats_key=self.stats_key,
             input_dim=self.input_dim,
             target_dim=self.target_dim,
+            load_input_stats=self.normalize_inputs or (self.segmentation_mode and self.assignment_normalize_features),
+            load_target_stats=self.normalize_targets,
         )
         self.x_mean_np = self.x_mean.numpy()
         self.x_std_np = self.x_std.numpy()
@@ -273,7 +294,6 @@ class MeshAttributeDataset(Dataset):
 
         self.assignment = None
         if self.segmentation_mode:
-            pretrain_cfg = train_cfg.get("pretrain_assignment", {}) or {}
             self.assignment = CoordinateKMeansAssignments(
                 source=self.source,
                 n_experts=int(model_cfg["n_experts"]),
@@ -283,7 +303,7 @@ class MeshAttributeDataset(Dataset):
                     method=str(pretrain_cfg.get("method", "coord_kmeans")),
                     fit_samples=int(pretrain_cfg.get("fit_samples", 50_000)),
                     cache_path=str(pretrain_cfg.get("cache_path", "")),
-                    normalize_features=bool(pretrain_cfg.get("normalize_features", self.normalize_inputs)),
+                    normalize_features=self.assignment_normalize_features,
                     random_seed=int(pretrain_cfg.get("random_seed", self.seed)),
                     chunk_size=int(pretrain_cfg.get("chunk_size", 65_536)),
                 ),

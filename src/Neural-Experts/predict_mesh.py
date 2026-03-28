@@ -5,13 +5,19 @@ import logging
 import sys
 from pathlib import Path
 
-import numpy as np
-import torch
-
 THIS_DIR = Path(__file__).resolve().parent
 for path in (str(THIS_DIR), str(THIS_DIR.parent)):
     if path not in sys.path:
         sys.path.insert(0, path)
+
+from runtime_limits import apply_runtime_thread_limits, configure_threading_env
+
+configure_threading_env()
+
+import numpy as np
+import torch
+
+THREAD_LIMITS = apply_runtime_thread_limits()
 
 from mesh.common import ensure_sys_path, load_config
 
@@ -48,6 +54,7 @@ def _parse_args():
 def main():
     logging.basicConfig(level=logging.INFO, format="%(asctime)s | %(levelname)s | %(message)s")
     args = _parse_args()
+    logger.info("Thread limits active: intra_op=%d inter_op=%d", THREAD_LIMITS[0], THREAD_LIMITS[1])
 
     cfg = load_config(args.config)
     payload = load_checkpoint(args.checkpoint, device="cpu")
@@ -69,7 +76,7 @@ def main():
     for t_index in selected:
         raw_time, indexer = time_indexers[t_index]
         coords = select_indexer_block(source, indexer).astype(np.float32)
-        coords_norm = normalize_coords(coords, x_mean, x_std, bool(cfg["DATA"].get("normalize_inputs", True)))
+        coords_norm = normalize_coords(coords, x_mean, x_std, bool(cfg["DATA"].get("normalize_inputs", False)))
         pred_norm, elapsed = predict_block(model, coords_norm, int(args.batch_size), device)
         pred = denormalize_targets(pred_norm, y_mean, y_std, bool(cfg["DATA"].get("normalize_targets", False)))
         out_path = outdir / f"{attr_name}_t{t_index:04d}.npy"
