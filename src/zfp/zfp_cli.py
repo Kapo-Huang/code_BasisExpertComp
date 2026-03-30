@@ -31,7 +31,7 @@ from compression_cli_common import (
 
 def main() -> int:
     parser = argparse.ArgumentParser(
-        description="Compress data with ZFP using PSNR or absolute error tolerance"
+        description="Compress data with ZFP using PSNR, absolute error tolerance, or rate"
     )
     parser.add_argument("--config", required=True, help="Path to the YAML config file")
     args = parser.parse_args()
@@ -59,18 +59,27 @@ def main() -> int:
 
         dtype_flag, dtype_label = get_zfp_dtype_flag(array.dtype)
         if target_mode == "psnr":
+            native_mode = "accuracy"
             data_range = compute_metrics(array, array)["data_range"]
-            tolerance = zfp_tolerance_from_psnr(data_range, target_psnr)
+            native_value = zfp_tolerance_from_psnr(data_range, target_psnr)
             log_progress(
                 "zfp",
                 f"Input ready: dtype={dtype_label}, shape={used_shape}, psnr={target_value:.6g}, "
-                f"derived_tolerance={tolerance:.6g}",
+                f"derived_tolerance={native_value:.6g}",
             )
-        else:
-            tolerance = target_value
+        elif target_mode == "tolerance":
+            native_mode = "accuracy"
+            native_value = target_value
             log_progress(
                 "zfp",
-                f"Input ready: dtype={dtype_label}, shape={used_shape}, tolerance={tolerance:.6g}",
+                f"Input ready: dtype={dtype_label}, shape={used_shape}, tolerance={native_value:.6g}",
+            )
+        else:
+            native_mode = "rate"
+            native_value = target_value
+            log_progress(
+                "zfp",
+                f"Input ready: dtype={dtype_label}, shape={used_shape}, rate={native_value:.6g} bits/value",
             )
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
@@ -87,7 +96,8 @@ def main() -> int:
                     compressed_path,
                     dtype_flag,
                     used_shape,
-                    tolerance,
+                    native_mode,
+                    native_value,
                 )
             )
             log_progress("zfp", f"Compression finished in {compress_result.elapsed_seconds:.3f}s")
@@ -117,8 +127,8 @@ def main() -> int:
             target_mode=target_mode,
             target_value=target_value,
             target_psnr=target_psnr,
-            native_mode="accuracy",
-            native_value=tolerance,
+            native_mode=native_mode,
+            native_value=native_value,
             original=array,
             reconstructed=reconstructed,
             compress_result=compress_result,

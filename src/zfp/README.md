@@ -1,6 +1,6 @@
 # ZFP Accuracy Wrapper
 
-This wrapper keeps the native `zfp` binary unchanged and exposes a YAML interface that accepts either `psnr` or absolute-error `tolerance`.
+This wrapper keeps the native `zfp` binary unchanged and exposes a YAML interface that accepts `psnr`, absolute-error `tolerance`, or `rate`.
 
 ## Build
 
@@ -28,6 +28,7 @@ zfp: build/bin/zfp
 
 psnr: 40.0
 # tolerance: 0.01
+# rate: 8.0
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.zfp
@@ -38,13 +39,14 @@ result_json: outputs/volRendering_H2_result.json
 Notes:
 
 - External PSNR is always `20 * log10((max(original) - min(original)) / rmse)`.
-- `psnr` and `tolerance` are mutually exclusive; provide exactly one.
+- `psnr`, `tolerance`, and `rate` are mutually exclusive; provide exactly one.
 - ZFP has no native PSNR mode, so when `psnr` is provided the wrapper converts it into native fixed-accuracy mode:
   `tolerance = data_range * 10^(-psnr / 20)`.
 - When `tolerance` is provided, the wrapper passes it directly to native `-a`.
+- When `rate` is provided, the wrapper passes it directly to native `-r` as bits per value.
 - Compression and decompression both use `-h`, so the `.zfp` file keeps the native header.
-- Only `float32` and `float64` inputs are supported in this fixed-accuracy wrapper.
-- Legacy `rate` is no longer accepted.
+- Only `float32` and `float64` inputs are supported in this wrapper.
+- `cr` is not accepted as a `rate` alias.
 - Progress logs are printed to `stderr`; the final JSON result stays on `stdout`.
 
 Tolerance-only example:
@@ -53,6 +55,19 @@ Tolerance-only example:
 input: ../path/to/volRendering_H2.npy
 zfp: build/bin/zfp
 tolerance: 0.01
+shape: [600, 248, 248]
+
+compressed: outputs/volRendering_H2.zfp
+recon: outputs/volRendering_H2_recon.npy
+result_json: outputs/volRendering_H2_result.json
+```
+
+Rate-only example:
+
+```yaml
+input: ../path/to/volRendering_H2.npy
+zfp: build/bin/zfp
+rate: 8.0
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.zfp
@@ -98,3 +113,5 @@ python zfp_cli.py --config configs/volRendering_H2.yaml
   "decompress_stderr": ""
 }
 ```
+
+For `rate` input, the same schema is used with `target_mode: "rate"`, `target_psnr: null`, `native_mode: "rate"`, and `native_value` equal to the configured bits per value.

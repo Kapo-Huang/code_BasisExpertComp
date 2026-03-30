@@ -126,14 +126,16 @@ def load_zfp_config(
     script_dir: Path,
     config_arg: str,
     binary_key: str = "zfp",
-    legacy_keys: Iterable[str] = ("cr", "rate"),
+    legacy_keys: Iterable[str] = ("cr",),
 ) -> dict[str, Any]:
     result, config = _load_common_config(script_dir, config_arg, binary_key, legacy_keys)
 
     has_psnr = "psnr" in config
     has_tolerance = "tolerance" in config
-    if has_psnr == has_tolerance:
-        raise ValueError("ZFP config must specify exactly one of 'psnr' or 'tolerance'.")
+    has_rate = "rate" in config
+    target_count = int(has_psnr) + int(has_tolerance) + int(has_rate)
+    if target_count != 1:
+        raise ValueError("ZFP config must specify exactly one of 'psnr', 'tolerance', or 'rate'.")
 
     if has_psnr:
         target_psnr = float(config["psnr"])
@@ -144,14 +146,26 @@ def load_zfp_config(
             "target_psnr": target_psnr,
         }
 
-    tolerance = float(config["tolerance"])
-    if not math.isfinite(tolerance) or tolerance <= 0.0:
-        raise ValueError("tolerance must be a positive finite number.")
+    if has_tolerance:
+        tolerance = float(config["tolerance"])
+        if not math.isfinite(tolerance) or tolerance <= 0.0:
+            raise ValueError("tolerance must be a positive finite number.")
+
+        return {
+            **result,
+            "target_mode": "tolerance",
+            "target_value": tolerance,
+            "target_psnr": None,
+        }
+
+    rate = float(config["rate"])
+    if not math.isfinite(rate) or rate <= 0.0:
+        raise ValueError("rate must be a positive finite number.")
 
     return {
         **result,
-        "target_mode": "tolerance",
-        "target_value": tolerance,
+        "target_mode": "rate",
+        "target_value": rate,
         "target_psnr": None,
     }
 
@@ -249,7 +263,7 @@ def get_zfp_dtype_flag(dtype: np.dtype[Any] | type[np.generic]) -> tuple[str, st
     }
     dtype_obj = np.dtype(dtype)
     if dtype_obj not in mapping:
-        raise TypeError("ZFP fixed-accuracy mode supports only float32 and float64 inputs")
+        raise TypeError("ZFP wrapper supports only float32 and float64 inputs")
     return mapping[dtype_obj]
 
 
@@ -369,8 +383,16 @@ def build_zfp_compress_command(
     compressed_path: Path,
     dtype_flag: str,
     shape: Sequence[int],
-    tolerance: float,
+    native_mode: str,
+    native_value: float,
 ) -> list[str]:
+    mode_flag_map = {
+        "accuracy": "-a",
+        "rate": "-r",
+    }
+    if native_mode not in mode_flag_map:
+        raise ValueError(f"Unsupported ZFP native mode: {native_mode}")
+
     return [
         str(binary_path),
         dtype_flag,
@@ -380,8 +402,8 @@ def build_zfp_compress_command(
         str(raw_input_path),
         "-z",
         str(compressed_path),
-        "-a",
-        format_number(tolerance),
+        mode_flag_map[native_mode],
+        format_number(native_value),
         "-h",
     ]
 

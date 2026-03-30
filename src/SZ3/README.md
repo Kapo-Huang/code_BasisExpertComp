@@ -39,6 +39,7 @@ Notes:
 - The wrapper calls SZ3 in native PSNR mode: `-M PSNR <psnr>`.
 - `.sz3pkg` stores the native `.sz` payload plus wrapper metadata.
 - Legacy `cr` is no longer accepted.
+- Progress logs are printed to `stderr`; the final JSON result stays on `stdout`.
 
 ## Run
 
@@ -59,6 +60,8 @@ python sz3_cli.py --config configs/volRendering_H2.yaml
   "loaded_shape": [36902400],
   "used_shape": [600, 248, 248],
   "dtype": "float32",
+  "target_mode": "psnr",
+  "target_value": 40.0,
   "target_psnr": 40.0,
   "native_mode": "psnr",
   "native_value": 40.0,
@@ -69,6 +72,9 @@ python sz3_cli.py --config configs/volRendering_H2.yaml
   "original_nbytes": 147609600,
   "compressed_nbytes": 15353,
   "compression_ratio": 9614.38155409366,
+  "compression_time_seconds": 1.24,
+  "decompression_time_seconds": 0.31,
+  "total_time_seconds": 1.55,
   "compress_stdout": "",
   "compress_stderr": "",
   "decompress_stdout": "",
