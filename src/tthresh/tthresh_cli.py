@@ -20,6 +20,7 @@ from compression_cli_common import (
     get_tthresh_dtype,
     load_array,
     load_psnr_config,
+    log_progress,
     run_command,
     tthresh_native_psnr,
     write_json,
@@ -45,6 +46,7 @@ def main() -> int:
         if result_json_path is not None:
             ensure_parent(result_json_path)
 
+        log_progress("tthresh", f"Loading input array from {input_path}")
         array, loaded_shape, used_shape = load_array(input_path, config["shape"])
         if len(used_shape) < 3:
             raise ValueError(
@@ -53,6 +55,10 @@ def main() -> int:
 
         io_type, dtype_label = get_tthresh_dtype(array.dtype)
         native_psnr = tthresh_native_psnr(target_psnr)
+        log_progress(
+            "tthresh",
+            f"Input ready: dtype={dtype_label}, shape={used_shape}, native_psnr={native_psnr:.6f}",
+        )
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             tmp_dir = Path(tmp_dir_name)
@@ -60,6 +66,7 @@ def main() -> int:
             raw_output_path = tmp_dir / "recon.raw"
             array.tofile(raw_input_path)
 
+            log_progress("tthresh", "Running native compression/decompression pipeline")
             command_result = run_command(
                 build_tthresh_command(
                     tthresh_path,
@@ -71,8 +78,10 @@ def main() -> int:
                     native_psnr,
                 )
             )
+            log_progress("tthresh", f"Pipeline finished in {command_result.elapsed_seconds:.3f}s")
 
             reconstructed = np.fromfile(raw_output_path, dtype=array.dtype).reshape(used_shape)
+            log_progress("tthresh", f"Saving reconstruction to {recon_path}")
             np.save(recon_path, reconstructed)
 
         result = build_result(
@@ -83,6 +92,8 @@ def main() -> int:
             loaded_shape=loaded_shape,
             used_shape=used_shape,
             dtype_label=dtype_label,
+            target_mode="psnr",
+            target_value=target_psnr,
             target_psnr=target_psnr,
             native_mode="psnr",
             native_value=native_psnr,
@@ -92,6 +103,7 @@ def main() -> int:
         )
 
         if result_json_path is not None:
+            log_progress("tthresh", f"Writing result JSON to {result_json_path}")
             write_json(result_json_path, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

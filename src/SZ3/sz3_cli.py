@@ -22,6 +22,7 @@ from compression_cli_common import (
     get_sz3_dtype_args,
     load_array,
     load_psnr_config,
+    log_progress,
     run_command,
     write_json,
 )
@@ -46,11 +47,13 @@ def main() -> int:
         if result_json_path is not None:
             ensure_parent(result_json_path)
 
+        log_progress("sz3", f"Loading input array from {input_path}")
         array, loaded_shape, used_shape = load_array(input_path, config["shape"])
         if not 1 <= len(used_shape) <= 4:
             raise ValueError(f"SZ3 supports only 1D-4D arrays, got ndim={len(used_shape)}")
 
         dtype_args, dtype_label = get_sz3_dtype_args(array.dtype)
+        log_progress("sz3", f"Input ready: dtype={dtype_label}, shape={used_shape}")
 
         with tempfile.TemporaryDirectory() as tmp_dir_name:
             tmp_dir = Path(tmp_dir_name)
@@ -59,6 +62,7 @@ def main() -> int:
             payload_path = tmp_dir / "payload.sz"
             array.tofile(raw_input_path)
 
+            log_progress("sz3", "Running native compression")
             compress_result = run_command(
                 build_sz3_compress_command(
                     sz3_path,
@@ -69,6 +73,7 @@ def main() -> int:
                     target_psnr,
                 )
             )
+            log_progress("sz3", f"Compression finished in {compress_result.elapsed_seconds:.3f}s")
 
             package_meta = {
                 "method": "sz3",
@@ -80,10 +85,12 @@ def main() -> int:
                 "native_value": target_psnr,
                 "payload": "payload.sz",
             }
+            log_progress("sz3", "Packaging compressed payload")
             with zipfile.ZipFile(compressed_path, "w", compression=zipfile.ZIP_STORED) as archive:
                 archive.write(payload_path, arcname="payload.sz")
                 archive.writestr("meta.json", json.dumps(package_meta, indent=2))
 
+            log_progress("sz3", "Running native decompression")
             decompress_result = run_command(
                 build_sz3_decompress_command(
                     sz3_path,
@@ -93,8 +100,10 @@ def main() -> int:
                     used_shape,
                 )
             )
+            log_progress("sz3", f"Decompression finished in {decompress_result.elapsed_seconds:.3f}s")
 
             reconstructed = np.fromfile(raw_output_path, dtype=array.dtype).reshape(used_shape)
+            log_progress("sz3", f"Saving reconstruction to {recon_path}")
             np.save(recon_path, reconstructed)
 
         result = build_result(
@@ -105,6 +114,8 @@ def main() -> int:
             loaded_shape=loaded_shape,
             used_shape=used_shape,
             dtype_label=dtype_label,
+            target_mode="psnr",
+            target_value=target_psnr,
             target_psnr=target_psnr,
             native_mode="psnr",
             native_value=target_psnr,
@@ -115,6 +126,7 @@ def main() -> int:
         )
 
         if result_json_path is not None:
+            log_progress("sz3", f"Writing result JSON to {result_json_path}")
             write_json(result_json_path, result)
         print(json.dumps(result, ensure_ascii=False, indent=2))
         return 0

@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 import math
 import subprocess
+import sys
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Iterable, Sequence
@@ -20,6 +22,7 @@ class CommandResult:
     stdout: str
     stderr: str
     returncode: int
+    elapsed_seconds: float = 0.0
 
 
 class CommandExecutionError(RuntimeError):
@@ -59,39 +62,97 @@ def load_yaml_config(config_path: Path) -> dict[str, Any]:
     return config
 
 
-def load_psnr_config(
+def _load_common_config(
     script_dir: Path,
     config_arg: str,
     binary_key: str,
-    legacy_keys: Iterable[str] = ("cr", "rate"),
-) -> dict[str, Any]:
+    legacy_keys: Iterable[str],
+) -> tuple[dict[str, Any], dict[str, Any]]:
     config_path = resolve_path(script_dir, config_arg)
     config = load_yaml_config(config_path)
 
     present_legacy_keys = [key for key in legacy_keys if key in config]
     if present_legacy_keys:
         joined = ", ".join(sorted(present_legacy_keys))
-        raise ValueError(f"Unsupported config keys: {joined}. Use 'psnr' instead.")
+        raise ValueError(f"Unsupported config keys: {joined}.")
 
-    required_keys = ("input", binary_key, "psnr", "compressed", "recon")
+    required_keys = ("input", binary_key, "compressed", "recon")
     missing = [key for key in required_keys if key not in config]
     if missing:
         joined = ", ".join(missing)
         raise ValueError(f"Missing required config keys: {joined}")
 
     result_json_value = config.get("result_json")
+    return (
+        {
+            "config_path": config_path,
+            "input_path": resolve_path(script_dir, config["input"]),
+            "binary_path": resolve_path(script_dir, config[binary_key]),
+            "compressed_path": resolve_path(script_dir, config["compressed"]),
+            "recon_path": resolve_path(script_dir, config["recon"]),
+            "result_json_path": resolve_path(script_dir, result_json_value)
+            if result_json_value
+            else None,
+            "shape": parse_shape(config.get("shape")),
+            "raw_config": config,
+        },
+        config,
+    )
+
+
+def load_psnr_config(
+    script_dir: Path,
+    config_arg: str,
+    binary_key: str,
+    legacy_keys: Iterable[str] = ("cr", "rate"),
+) -> dict[str, Any]:
+    result, config = _load_common_config(script_dir, config_arg, binary_key, legacy_keys)
+
+    if "tolerance" in config:
+        raise ValueError("Unsupported config keys: tolerance. Use 'psnr' only.")
+    if "psnr" not in config:
+        raise ValueError("Missing required config keys: psnr")
+
+    target_psnr = float(config["psnr"])
     return {
-        "config_path": config_path,
-        "input_path": resolve_path(script_dir, config["input"]),
-        "binary_path": resolve_path(script_dir, config[binary_key]),
-        "compressed_path": resolve_path(script_dir, config["compressed"]),
-        "recon_path": resolve_path(script_dir, config["recon"]),
-        "result_json_path": resolve_path(script_dir, result_json_value)
-        if result_json_value
-        else None,
-        "shape": parse_shape(config.get("shape")),
-        "target_psnr": float(config["psnr"]),
-        "raw_config": config,
+        **result,
+        "target_mode": "psnr",
+        "target_value": target_psnr,
+        "target_psnr": target_psnr,
+    }
+
+
+def load_zfp_config(
+    script_dir: Path,
+    config_arg: str,
+    binary_key: str = "zfp",
+    legacy_keys: Iterable[str] = ("cr", "rate"),
+) -> dict[str, Any]:
+    result, config = _load_common_config(script_dir, config_arg, binary_key, legacy_keys)
+
+    has_psnr = "psnr" in config
+    has_tolerance = "tolerance" in config
+    if has_psnr == has_tolerance:
+        raise ValueError("ZFP config must specify exactly one of 'psnr' or 'tolerance'.")
+
+    if has_psnr:
+        target_psnr = float(config["psnr"])
+        return {
+            **result,
+            "target_mode": "psnr",
+            "target_value": target_psnr,
+            "target_psnr": target_psnr,
+        }
+
+    tolerance = float(config["tolerance"])
+    if not math.isfinite(tolerance) or tolerance <= 0.0:
+        raise ValueError("tolerance must be a positive finite number.")
+
+    return {
+        **result,
+        "target_mode": "tolerance",
+        "target_value": tolerance,
+        "target_psnr": None,
     }
 
 
@@ -115,17 +176,20 @@ def load_array(
 
 def run_command(command: Sequence[str | Path]) -> CommandResult:
     normalized_command = tuple(str(item) for item in command)
+    start_time = time.perf_counter()
     completed = subprocess.run(
         normalized_command,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
     )
+    elapsed_seconds = time.perf_counter() - start_time
     result = CommandResult(
         command=normalized_command,
         stdout=completed.stdout,
         stderr=completed.stderr,
         returncode=completed.returncode,
+        elapsed_seconds=elapsed_seconds,
     )
     if result.returncode != 0:
         raise CommandExecutionError(result)
@@ -145,6 +209,10 @@ def format_command_error(error: CommandExecutionError) -> str:
         lines.append("STDERR:")
         lines.append(result.stderr.rstrip())
     return "\n".join(lines) + "\n"
+
+
+def log_progress(method: str, message: str) -> None:
+    print(f"[{method}] {message}", file=sys.stderr, flush=True)
 
 
 def get_sz3_dtype_args(dtype: np.dtype[Any] | type[np.generic]) -> tuple[list[str], str]:
@@ -181,7 +249,7 @@ def get_zfp_dtype_flag(dtype: np.dtype[Any] | type[np.generic]) -> tuple[str, st
     }
     dtype_obj = np.dtype(dtype)
     if dtype_obj not in mapping:
-        raise TypeError("ZFP PSNR mode supports only float32 and float64 inputs")
+        raise TypeError("ZFP fixed-accuracy mode supports only float32 and float64 inputs")
     return mapping[dtype_obj]
 
 
@@ -342,7 +410,9 @@ def build_result(
     loaded_shape: Sequence[int],
     used_shape: Sequence[int],
     dtype_label: str,
-    target_psnr: float,
+    target_mode: str,
+    target_value: float,
+    target_psnr: float | None,
     native_mode: str,
     native_value: float,
     original: np.ndarray,
@@ -354,6 +424,8 @@ def build_result(
     compressed_nbytes = int(compressed_path.stat().st_size)
     original_nbytes = int(original.nbytes)
     compression_ratio = float("inf") if compressed_nbytes == 0 else float(original_nbytes / compressed_nbytes)
+    compression_time_seconds = float(compress_result.elapsed_seconds) if compress_result else 0.0
+    decompression_time_seconds = float(decompress_result.elapsed_seconds) if decompress_result else 0.0
 
     return {
         "method": method,
@@ -363,7 +435,9 @@ def build_result(
         "loaded_shape": list(loaded_shape),
         "used_shape": list(used_shape),
         "dtype": dtype_label,
-        "target_psnr": float(target_psnr),
+        "target_mode": target_mode,
+        "target_value": float(target_value),
+        "target_psnr": float(target_psnr) if target_psnr is not None else None,
         "native_mode": native_mode,
         "native_value": float(native_value),
         "measured_psnr": metrics["measured_psnr"],
@@ -373,6 +447,9 @@ def build_result(
         "original_nbytes": original_nbytes,
         "compressed_nbytes": compressed_nbytes,
         "compression_ratio": compression_ratio,
+        "compression_time_seconds": compression_time_seconds,
+        "decompression_time_seconds": decompression_time_seconds,
+        "total_time_seconds": compression_time_seconds + decompression_time_seconds,
         "compress_stdout": compress_result.stdout if compress_result else "",
         "compress_stderr": compress_result.stderr if compress_result else "",
         "decompress_stdout": decompress_result.stdout if decompress_result else "",
