@@ -113,7 +113,6 @@ def _default_attr_registry() -> dict[str, AttrRegistryEntry]:
             gt_path=(root / "ocean/train/target_fort63.npy").resolve(),
             coords_path=(root / "ocean/train/source_XYZT.npy").resolve(),
             preferred_association="point",
-            raw_replacements=((-99999.0, -3.8),),
         ),
         "target_fort64": AttrRegistryEntry(
             stem="target_fort64",
@@ -429,14 +428,6 @@ def _restore_prediction_shape(
         return ShapeRestoreResult(
             array=recon_array,
             transform="identity",
-            recon_shape=recon_shape,
-            restored_shape=target_shape,
-        )
-
-    if recon_array.ndim == 2 and tuple(reversed(recon_shape)) == target_shape:
-        return ShapeRestoreResult(
-            array=np.transpose(recon_array),
-            transform="transpose",
             recon_shape=recon_shape,
             restored_shape=target_shape,
         )
