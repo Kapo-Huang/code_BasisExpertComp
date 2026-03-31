@@ -46,6 +46,7 @@ class AttrEvalSpec:
     raw_gt_path: Path
     offset: np.ndarray | None
     scale: np.ndarray | None
+    raw_replacements: tuple[tuple[float, float], ...] = ()
 
 
 @dataclass(frozen=True)
@@ -57,6 +58,7 @@ class DatasetLoadResult:
     raw_coords_path: Path
     raw_gt_paths: dict[str, Path]
     attr_eval_affines: dict[str, tuple[np.ndarray, np.ndarray] | None]
+    attr_eval_replacements: dict[str, tuple[tuple[float, float], ...]]
 
 
 @dataclass
@@ -67,6 +69,14 @@ class EvaluationSetup:
     train_gt_paths: dict[str, Path]
     raw_coords_path: Path
     attr_specs: dict[str, AttrEvalSpec]
+
+
+@dataclass(frozen=True)
+class MinMaxRule:
+    axis: str
+    denominator: str
+    replacements: tuple[tuple[float, float], ...] = ()
+    cache_flavor: str = "minmax"
 
 
 def _parse_args():
@@ -83,6 +93,30 @@ def _parse_args():
         type=int,
         default=None,
         help="0-based index into sorted unique timesteps. Default: render all timesteps.",
+    )
+    parser.add_argument(
+        "--attr",
+        type=str,
+        default="",
+        help="Comma-separated attr names to render. Default: all attrs in the experiment.",
+    )
+    parser.add_argument(
+        "--zoom",
+        type=float,
+        default=None,
+        help="Override render zoom factor. Default: dataset-specific internal default.",
+    )
+    parser.add_argument(
+        "--clip-max-percentile",
+        type=float,
+        default=None,
+        help="Clip the render color upper bound to this GT percentile. Example: 99.7. Default: no clipping.",
+    )
+    parser.add_argument(
+        "--output-root",
+        type=str,
+        default="",
+        help="Output root for rendered images and default CSV path. Default: ./validate_out",
     )
     parser.add_argument(
         "--csv",
@@ -150,6 +184,34 @@ def _pick_checkpoint(ckpt_dir: Path) -> Path:
     chosen = max(ckpt_files, key=lambda path: (path.stat().st_mtime, path.name))
     logger.info("Selected latest checkpoint by mtime fallback: %s", chosen)
     return chosen
+
+
+def _extract_run_timestamp(path: Path) -> str | None:
+    match = re.search(r"_(\d{8}_\d{6})(?:_epoch\d+)?$", path.stem)
+    if not match:
+        return None
+    return match.group(1)
+
+
+def _pick_config_path(exp_dir: Path, ckpt_path: Path) -> Path:
+    config_dir = exp_dir / "configs"
+    timestamp = _extract_run_timestamp(ckpt_path)
+    candidates: list[Path] = []
+    if timestamp:
+        candidates.append(config_dir / f"config_{timestamp}.yaml")
+    candidates.append(config_dir / "config.yaml")
+
+    for candidate in candidates:
+        if candidate.exists():
+            return candidate.resolve()
+
+    snapshot_candidates = sorted(config_dir.glob("config_*.yaml"))
+    if snapshot_candidates:
+        chosen = max(snapshot_candidates, key=lambda path: (path.stat().st_mtime, path.name))
+        logger.warning("Falling back to latest config snapshot: %s", chosen)
+        return chosen.resolve()
+
+    raise FileNotFoundError(f"Config not found under: {config_dir}")
 
 
 def _resolve_stats_path(data_cfg: dict) -> str | None:
@@ -260,14 +322,171 @@ def _validation_stats_cache_path(raw_gt_path: Path) -> Path:
     return Path("validate_out") / "_stats_cache" / f"{raw_gt_path.stem}_validation_stats.npz"
 
 
-def _validation_normalized_cache_path(raw_path: Path) -> Path:
+def _sanitize_token(value: str) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]+", "_", value)
+
+
+def _validation_normalized_cache_path(raw_path: Path, flavor: str = "normalized") -> Path:
     cache_root = Path("validate_out") / "_normalized_cache"
     try:
         relative_parent = raw_path.resolve().relative_to(Path.cwd().resolve()).parent
         target_parent = cache_root / relative_parent
     except ValueError:
         target_parent = cache_root / raw_path.parent.name
-    return target_parent / f"{raw_path.stem}_normalized_validate_v2{raw_path.suffix}"
+    cache_flavor = _sanitize_token(flavor or "normalized")
+    return target_parent / f"{raw_path.stem}_{cache_flavor}_validate_v2{raw_path.suffix}"
+
+
+def _minmax_attr_token(attr_name: str) -> str:
+    token = str(attr_name).strip()
+    for prefix in ("data_", "target_", "targets_"):
+        if token.startswith(prefix):
+            token = token[len(prefix):]
+            break
+    return token or str(attr_name).strip()
+
+
+def _source_minmax_rule(dataset_name: str) -> MinMaxRule:
+    dataset_name = str(dataset_name).strip().lower()
+    return MinMaxRule(
+        axis="perdim",
+        denominator="range",
+        cache_flavor=f"{dataset_name}_source_perdim_minmax",
+    )
+
+
+def _target_minmax_rule(dataset_name: str, attr_name: str) -> MinMaxRule:
+    dataset_name = str(dataset_name).strip().lower()
+    attr_token = _minmax_attr_token(attr_name)
+    if dataset_name == "ocean":
+        replacements: tuple[tuple[float, float], ...] = ()
+        if attr_token == "fort63":
+            replacements = ((-99999.0, -3.8),)
+        return MinMaxRule(
+            axis="global",
+            denominator="range",
+            replacements=replacements,
+            cache_flavor=f"ocean_{_sanitize_token(attr_token)}_global_minmax",
+        )
+    if dataset_name == "stress":
+        denominator = "max" if attr_token == "cell_S_IntegrationPoints" else "range"
+        return MinMaxRule(
+            axis="perdim",
+            denominator=denominator,
+            cache_flavor=f"stress_{_sanitize_token(attr_token)}_{denominator}_perdim_minmax",
+        )
+    raise ValueError(f"Unsupported dataset_name for min-max rule: {dataset_name}")
+
+
+def _apply_replacements(values: np.ndarray, replacements: tuple[tuple[float, float], ...]) -> np.ndarray:
+    if not replacements:
+        return np.asarray(values)
+    out = np.array(values, copy=True)
+    for old, new in replacements:
+        out[out == old] = new
+    return out
+
+
+def _stream_minmax_stats(raw_path: Path, rule: MinMaxRule) -> tuple[np.ndarray, np.ndarray]:
+    raw = _as_feature_matrix(np.load(str(raw_path), mmap_mode="r", allow_pickle=False))
+    rows = int(raw.shape[0])
+    dims = int(raw.shape[1])
+    chunk_rows = max(1, min(rows, max(1, 1_000_000 // max(dims, 1))))
+
+    if rule.axis == "global":
+        scalar_min = float("inf")
+        scalar_max = float("-inf")
+        per_dim_min = None
+        per_dim_max = None
+    else:
+        scalar_min = None
+        scalar_max = None
+        per_dim_min = None
+        per_dim_max = None
+
+    for start in range(0, rows, chunk_rows):
+        end = min(start + chunk_rows, rows)
+        block = np.asarray(raw[start:end], dtype=np.float32)
+        block = _apply_replacements(block, rule.replacements).astype(np.float32, copy=False)
+        if rule.axis == "global":
+            scalar_min = min(float(scalar_min), float(np.min(block)))
+            scalar_max = max(float(scalar_max), float(np.max(block)))
+        else:
+            block_min = np.min(block, axis=0, keepdims=True)
+            block_max = np.max(block, axis=0, keepdims=True)
+            per_dim_min = block_min if per_dim_min is None else np.minimum(per_dim_min, block_min)
+            per_dim_max = block_max if per_dim_max is None else np.maximum(per_dim_max, block_max)
+
+    if rule.axis == "global":
+        min_arr = np.full((1, dims), float(scalar_min), dtype=np.float32)
+        max_arr = np.full((1, dims), float(scalar_max), dtype=np.float32)
+    else:
+        min_arr = np.asarray(per_dim_min, dtype=np.float32).reshape(1, dims)
+        max_arr = np.asarray(per_dim_max, dtype=np.float32).reshape(1, dims)
+    return min_arr, max_arr
+
+
+def _denominator_from_rule(raw_min: np.ndarray, raw_max: np.ndarray, rule: MinMaxRule) -> np.ndarray:
+    if rule.denominator == "max":
+        denom = np.asarray(raw_max, dtype=np.float32)
+    elif rule.denominator == "range":
+        denom = np.asarray(raw_max, dtype=np.float32) - np.asarray(raw_min, dtype=np.float32)
+    else:
+        raise ValueError(f"Unsupported denominator rule: {rule.denominator}")
+    return np.where(np.abs(denom) < 1.0e-12, np.ones_like(denom, dtype=np.float32), denom).astype(np.float32)
+
+
+@lru_cache(maxsize=None)
+def _minmax_affine(
+    raw_path_value: str,
+    axis: str,
+    denominator: str,
+    replacements_key: tuple[tuple[float, float], ...],
+) -> tuple[np.ndarray, np.ndarray]:
+    rule = MinMaxRule(
+        axis=axis,
+        denominator=denominator,
+        replacements=replacements_key,
+        cache_flavor="cached",
+    )
+    raw_min, raw_max = _stream_minmax_stats(Path(raw_path_value).resolve(), rule)
+    denom = _denominator_from_rule(raw_min, raw_max, rule)
+    scale = denom / 2.0
+    offset = raw_min + scale
+    return offset.astype(np.float32), scale.astype(np.float32)
+
+
+def _ensure_minmax_normalized_cache(raw_path: Path, rule: MinMaxRule) -> Path:
+    cache_path = _validation_normalized_cache_path(raw_path, flavor=rule.cache_flavor)
+    if cache_path.exists():
+        return cache_path.resolve()
+
+    cache_path.parent.mkdir(parents=True, exist_ok=True)
+    tmp_path = cache_path.with_name(f"{cache_path.stem}.tmp{cache_path.suffix}")
+    if tmp_path.exists():
+        tmp_path.unlink()
+
+    raw = _as_feature_matrix(np.load(str(raw_path), mmap_mode="r", allow_pickle=False))
+    raw_min, raw_max = _stream_minmax_stats(raw_path, rule)
+    denom = _denominator_from_rule(raw_min, raw_max, rule)
+    rows = int(raw.shape[0])
+    dims = int(raw.shape[1])
+    rows_per_chunk = max(1, min(rows, max(1, 1_000_000 // max(dims, 1))))
+    normalized = np.lib.format.open_memmap(
+        str(tmp_path),
+        mode="w+",
+        dtype=np.float32,
+        shape=raw.shape,
+    )
+    for start in range(0, rows, rows_per_chunk):
+        end = min(start + rows_per_chunk, rows)
+        block = np.asarray(raw[start:end], dtype=np.float32)
+        block = _apply_replacements(block, rule.replacements).astype(np.float32, copy=False)
+        normalized[start:end] = ((block - raw_min) / denom) * 2.0 - 1.0
+    del normalized
+    tmp_path.replace(cache_path)
+    logger.info("Created min-max normalized cache: %s", cache_path)
+    return cache_path.resolve()
 
 
 def _stress_minmax_denominator(raw_path: Path, raw_min: np.ndarray, raw_max: np.ndarray) -> np.ndarray:
@@ -369,6 +588,62 @@ def _prepare_stress_minmax_fallback(
     )
 
 
+def _prepare_ocean_minmax_fallback(
+    data_cfg: dict,
+    data_info: dict,
+    x_path: Path,
+    y_path: Path | None,
+    attr_paths: dict[str, Path],
+) -> tuple[
+    Path,
+    Path | None,
+    dict[str, Path],
+    dict[str, Path],
+    dict[str, tuple[np.ndarray, np.ndarray]],
+    dict[str, tuple[tuple[float, float], ...]],
+]:
+    dataset_name = str(data_cfg.get("dataset_name", "")).strip().lower()
+    if dataset_name != "ocean" or bool(data_cfg.get("normalize", True)):
+        raise ValueError("Ocean min-max fallback only applies to ocean configs with normalize=false.")
+
+    raw_coords_path = _resolve_raw_eval_path(x_path)
+    x_load_path = _ensure_minmax_normalized_cache(raw_coords_path, _source_minmax_rule(dataset_name))
+
+    if attr_paths:
+        y_load_path = None
+        load_attr_paths: dict[str, Path] = {}
+        raw_gt_paths: dict[str, Path] = {}
+        attr_eval_affines: dict[str, tuple[np.ndarray, np.ndarray]] = {}
+        attr_eval_replacements: dict[str, tuple[tuple[float, float], ...]] = {}
+        for attr_name, configured_path in attr_paths.items():
+            raw_gt_path = _resolve_raw_eval_path(configured_path)
+            raw_gt_paths[attr_name] = raw_gt_path
+            rule = _target_minmax_rule(dataset_name, attr_name)
+            load_attr_paths[attr_name] = _ensure_minmax_normalized_cache(raw_gt_path, rule)
+            offset, scale = _minmax_affine(str(raw_gt_path), rule.axis, rule.denominator, rule.replacements)
+            attr_eval_affines[attr_name] = (offset, scale)
+            attr_eval_replacements[attr_name] = rule.replacements
+        return x_load_path, y_load_path, load_attr_paths, raw_gt_paths, attr_eval_affines, attr_eval_replacements
+
+    if y_path is None:
+        raise ValueError("Expected y_path for single-target ocean min-max fallback.")
+
+    attr_name = _infer_single_target_attr_name(data_info)
+    raw_gt_path = _resolve_raw_eval_path(y_path)
+    rule = _target_minmax_rule(dataset_name, attr_name)
+    offset, scale = _minmax_affine(str(raw_gt_path), rule.axis, rule.denominator, rule.replacements)
+    attr_eval_affines = {attr_name: (offset, scale)}
+    attr_eval_replacements = {attr_name: rule.replacements}
+    return (
+        x_load_path,
+        _ensure_minmax_normalized_cache(raw_gt_path, rule),
+        {},
+        {attr_name: raw_gt_path},
+        attr_eval_affines,
+        attr_eval_replacements,
+    )
+
+
 def _load_attr_denorm_stats(data_cfg: dict, attr_name: str, raw_gt_path: Path) -> tuple[np.ndarray, np.ndarray]:
     stats_path = _resolve_raw_stats_path(data_cfg, raw_gt_path)
     if stats_path is None:
@@ -396,6 +671,7 @@ def _resolve_attr_eval_spec(
     train_gt_path: Path,
     raw_gt_path: Path,
     preset_affine: tuple[np.ndarray, np.ndarray] | None = None,
+    raw_replacements: tuple[tuple[float, float], ...] = (),
 ) -> AttrEvalSpec:
     if bool(getattr(dataset, "normalize", False)):
         if isinstance(dataset, MultiViewCoordDataset):
@@ -408,6 +684,7 @@ def _resolve_attr_eval_spec(
             raw_gt_path=raw_gt_path,
             offset=_as_stat_matrix(offset),
             scale=_as_stat_matrix(scale),
+            raw_replacements=raw_replacements,
         )
 
     if preset_affine is not None:
@@ -416,13 +693,19 @@ def _resolve_attr_eval_spec(
             raw_gt_path=raw_gt_path,
             offset=_as_stat_matrix(offset),
             scale=_as_stat_matrix(scale),
+            raw_replacements=raw_replacements,
         )
 
     if train_gt_path.resolve() == raw_gt_path.resolve():
-        return AttrEvalSpec(raw_gt_path=raw_gt_path, offset=None, scale=None)
+        return AttrEvalSpec(raw_gt_path=raw_gt_path, offset=None, scale=None, raw_replacements=raw_replacements)
 
     offset, scale = _load_attr_denorm_stats(data_cfg, attr_name, raw_gt_path)
-    return AttrEvalSpec(raw_gt_path=raw_gt_path, offset=offset, scale=scale)
+    return AttrEvalSpec(
+        raw_gt_path=raw_gt_path,
+        offset=offset,
+        scale=scale,
+        raw_replacements=raw_replacements,
+    )
 
 
 def _build_evaluation_setup(cfg: dict) -> EvaluationSetup:
@@ -437,6 +720,7 @@ def _build_evaluation_setup(cfg: dict) -> EvaluationSetup:
             Path(train_gt_path).resolve(),
             raw_gt_path,
             preset_affine=load_result.attr_eval_affines.get(attr_name),
+            raw_replacements=load_result.attr_eval_replacements.get(attr_name, ()),
         )
     return EvaluationSetup(
         dataset=load_result.dataset,
@@ -485,20 +769,32 @@ def _load_dataset(cfg: dict) -> DatasetLoadResult:
             raise FileNotFoundError(f"Missing dataset artifact(s): {missing_text}")
 
         attr_eval_affines: dict[str, tuple[np.ndarray, np.ndarray] | None] = {}
+        attr_eval_replacements: dict[str, tuple[tuple[float, float], ...]] = {}
         if not normalize:
             dataset_name = str(data_cfg.get("dataset_name", "")).strip().lower()
-            if dataset_name != "stress":
+            if dataset_name == "stress":
+                x_path, y_path, attr_paths, raw_gt_paths, attr_eval_affines = _prepare_stress_minmax_fallback(
+                    data_cfg,
+                    data_info,
+                    x_path,
+                    y_path,
+                    attr_paths,
+                )
+            elif dataset_name == "ocean":
+                x_path, y_path, attr_paths, raw_gt_paths, attr_eval_affines, attr_eval_replacements = (
+                    _prepare_ocean_minmax_fallback(
+                        data_cfg,
+                        data_info,
+                        x_path,
+                        y_path,
+                        attr_paths,
+                    )
+                )
+            else:
                 raise FileNotFoundError(
                     "Missing pre-normalized dataset artifacts for a normalize=false config; "
-                    "automatic min-max fallback is only implemented for stress experiments."
+                    "automatic min-max fallback is only implemented for stress/ocean experiments."
                 )
-            x_path, y_path, attr_paths, raw_gt_paths, attr_eval_affines = _prepare_stress_minmax_fallback(
-                data_cfg,
-                data_info,
-                x_path,
-                y_path,
-                attr_paths,
-            )
             stats_path = None
             logger.info(
                 "Dataset artifacts missing for config paths; rebuilt min-max normalized cache from raw data. x=%s",
@@ -533,6 +829,7 @@ def _load_dataset(cfg: dict) -> DatasetLoadResult:
             )
     else:
         attr_eval_affines = {}
+        attr_eval_replacements = {}
 
     if data_info.get("attr_paths"):
         dataset = MultiViewCoordDataset(
@@ -562,6 +859,7 @@ def _load_dataset(cfg: dict) -> DatasetLoadResult:
         raw_coords_path=raw_coords_path,
         raw_gt_paths=raw_gt_paths,
         attr_eval_affines=attr_eval_affines,
+        attr_eval_replacements=attr_eval_replacements,
     )
 
 
@@ -588,6 +886,29 @@ def _infer_single_target_attr_name(data_info: dict) -> str:
     return f"data_{stem}"
 
 
+def _parse_requested_attrs(attr_arg: str | None, available_attrs: list[str]) -> list[str]:
+    available = [str(name) for name in available_attrs]
+    if not attr_arg:
+        return list(available)
+
+    requested = [item.strip() for item in str(attr_arg).split(",") if item.strip()]
+    if not requested:
+        return list(available)
+
+    if len(available) == 1:
+        only_attr = available[0]
+        if len(requested) != 1 or requested[0] != only_attr:
+            raise ValueError(
+                f"--attr must match the experiment's only attribute '{only_attr}'. Got: {requested}"
+            )
+        return [only_attr]
+
+    unknown = [name for name in requested if name not in available]
+    if unknown:
+        raise KeyError(f"Unknown attrs: {unknown}. Available attrs: {available}")
+    return requested
+
+
 def _select_tensor_block(tensor: torch.Tensor, indexer: slice | np.ndarray) -> torch.Tensor:
     if isinstance(indexer, slice):
         return tensor[indexer]
@@ -596,6 +917,43 @@ def _select_tensor_block(tensor: torch.Tensor, indexer: slice | np.ndarray) -> t
 
 def _select_array_block(array: np.ndarray, indexer: slice | np.ndarray) -> np.ndarray:
     return np.asarray(array[indexer])
+
+
+def _select_gt_eval_block(
+    array: np.ndarray,
+    indexer: slice | np.ndarray,
+    spec: AttrEvalSpec,
+) -> np.ndarray:
+    values = _as_feature_matrix(_select_array_block(array, indexer).astype(np.float32, copy=False))
+    if spec.raw_replacements:
+        values = _apply_replacements(values, spec.raw_replacements).astype(np.float32, copy=False)
+    return values
+
+
+def _align_eval_shapes(
+    gt_values: np.ndarray,
+    pred_values: np.ndarray,
+    attr_name: str,
+) -> tuple[np.ndarray, np.ndarray]:
+    gt_arr = _as_feature_matrix(np.asarray(gt_values, dtype=np.float32))
+    pred_arr = _as_feature_matrix(np.asarray(pred_values, dtype=np.float32))
+    if gt_arr.shape == pred_arr.shape:
+        return gt_arr, pred_arr
+    if gt_arr.shape[0] != pred_arr.shape[0]:
+        raise ValueError(f"Eval row mismatch for {attr_name}: gt={gt_arr.shape}, pred={pred_arr.shape}")
+    if gt_arr.shape[1] == 1 and pred_arr.shape[1] > 1:
+        logger.warning(
+            "Collapsing multi-channel prediction to scalar mean for attr=%s: gt=%s pred=%s",
+            attr_name,
+            gt_arr.shape,
+            pred_arr.shape,
+        )
+        pred_arr = np.mean(pred_arr, axis=1, keepdims=True, dtype=np.float32)
+        return gt_arr, pred_arr.astype(np.float32, copy=False)
+    if pred_arr.shape[1] == 1 and gt_arr.shape[1] > 1:
+        pred_arr = np.repeat(pred_arr, gt_arr.shape[1], axis=1)
+        return gt_arr, pred_arr.astype(np.float32, copy=False)
+    raise ValueError(f"Eval shape mismatch for {attr_name}: gt={gt_arr.shape}, pred={pred_arr.shape}")
 
 
 def _as_feature_matrix(values: np.ndarray) -> np.ndarray:
@@ -639,6 +997,31 @@ def _normalize_clim(clim: tuple[float, float] | None) -> tuple[float, float]:
         delta = max(abs(lo), 1.0) * 1e-6
         return lo - delta, hi + delta
     return lo, hi
+
+
+def _clip_upper_clim(
+    clim: tuple[float, float],
+    gt_visual_blocks: list[np.ndarray],
+    percentile: float | None,
+) -> tuple[float, float]:
+    lo, hi = _normalize_clim(clim)
+    if percentile is None:
+        return lo, hi
+
+    finite_blocks: list[np.ndarray] = []
+    for block in gt_visual_blocks:
+        flat = np.asarray(block, dtype=np.float32).reshape(-1)
+        finite = flat[np.isfinite(flat)]
+        if finite.size:
+            finite_blocks.append(finite)
+    if not finite_blocks:
+        return lo, hi
+
+    merged = np.concatenate(finite_blocks, axis=0)
+    clipped_hi = float(np.percentile(merged, float(percentile)))
+    if not np.isfinite(clipped_hi) or clipped_hi <= lo or clipped_hi >= hi:
+        return lo, hi
+    return lo, clipped_hi
 
 
 def _predict_block(
@@ -926,6 +1309,7 @@ def _render_frame(
     plotter.add_mesh(
         mesh,
         scalars="U_vis",
+        cmap="viridis",
         clim=list(clim),
         show_edges=False,
         show_scalar_bar=False,
@@ -1093,25 +1477,34 @@ def validate_experiment(
     experiment_path: str | Path,
     csv_path: str | Path | None = None,
     timestamp: int | None = None,
+    attr: str | None = None,
+    zoom: float | None = None,
+    clip_max_percentile: float | None = None,
+    output_root: str | Path | None = None,
 ) -> Path:
     exp_dir = Path(experiment_path).resolve()
     if not exp_dir.exists() or not exp_dir.is_dir():
         raise FileNotFoundError(f"Experiment directory not found: {exp_dir}")
 
-    cfg_path = exp_dir / "configs" / "config.yaml"
-    if not cfg_path.exists():
-        raise FileNotFoundError(f"Config not found: {cfg_path}")
-
     ckpt_path = _pick_checkpoint(exp_dir / "checkpoints").resolve()
+    cfg_path = _pick_config_path(exp_dir, ckpt_path)
     cfg = load_config(str(cfg_path))
     exp_id = str(cfg.get("exp_id") or exp_dir.name)
 
     eval_setup = _build_evaluation_setup(cfg)
     dataset = eval_setup.dataset
     data_info = eval_setup.data_info
-    attrs = eval_setup.attrs
+    attrs = _parse_requested_attrs(attr, eval_setup.attrs)
+    attr_specs = {name: eval_setup.attr_specs[name] for name in attrs}
 
-    for attr_name, spec in eval_setup.attr_specs.items():
+    if zoom is not None and float(zoom) <= 0.0:
+        raise ValueError(f"--zoom must be positive, got {zoom}")
+    if clip_max_percentile is not None and not (0.0 < float(clip_max_percentile) <= 100.0):
+        raise ValueError(
+            f"--clip-max-percentile must be in (0, 100], got {clip_max_percentile}"
+        )
+
+    for attr_name, spec in attr_specs.items():
         if not spec.raw_gt_path.exists():
             raise FileNotFoundError(f"Ground-truth file not found for '{attr_name}': {spec.raw_gt_path}")
 
@@ -1188,16 +1581,17 @@ def validate_experiment(
     )
     gt_arrays = {
         name: np.load(str(spec.raw_gt_path), mmap_mode="r", allow_pickle=False)
-        for name, spec in eval_setup.attr_specs.items()
+        for name, spec in attr_specs.items()
     }
 
     dataset_name = _dataset_name(data_info)
-    out_root = Path("validate_out")
+    out_root = Path(output_root).resolve() if output_root else Path("validate_out").resolve()
     resolved_csv_path = (
         Path(csv_path).resolve()
         if csv_path
         else _default_csv_path(out_root, dataset_name, exp_id).resolve()
     )
+    zoom_factor = float(zoom) if zoom is not None else _render_zoom_factor(data_info)
 
     logger.info("Experiment: %s", exp_id)
     logger.info("Dataset: %s", dataset_name)
@@ -1207,13 +1601,20 @@ def validate_experiment(
     logger.info("Eval raw coords path: %s", eval_setup.raw_coords_path)
     logger.info("Attrs: %s", attrs)
     logger.info("CSV output: %s", resolved_csv_path)
-    logger.info("Render zoom factor: %.2f", _render_zoom_factor(data_info))
+    logger.info("Render zoom factor: %.2f", zoom_factor)
+    logger.info(
+        "Render clip max percentile: %s",
+        "none" if clip_max_percentile is None else f"{float(clip_max_percentile):.3f}",
+    )
     logger.info(
         "Rendering timesteps: %s",
         [f"{step['time_index']}({step['raw_time']})" for step in selected_steps],
     )
 
     attr_clims: dict[str, tuple[float, float] | None] = {name: None for name in attrs}
+    gt_visual_blocks: dict[str, list[np.ndarray]] | None = (
+        {name: [] for name in attrs} if clip_max_percentile is not None else None
+    )
     psnr_map: dict[tuple[str, int], float] = {}
 
     logger.info("Pass 1/2: collecting per-attr color ranges and PSNR")
@@ -1221,28 +1622,46 @@ def validate_experiment(
         coords_block = _select_tensor_block(dataset.x, step["indexer"])
         pred_map = _predict_block(model, coords_block, attrs, batch_size, device)
         for attr_name in attrs:
-            spec = eval_setup.attr_specs[attr_name]
+            spec = attr_specs[attr_name]
             pred_denorm = _denormalize_for_eval(pred_map[attr_name], spec)
-            gt_values = _as_feature_matrix(_select_array_block(gt_arrays[attr_name], step["indexer"]))
+            gt_values = _select_gt_eval_block(gt_arrays[attr_name], step["indexer"], spec)
+            gt_values, pred_denorm = _align_eval_shapes(gt_values, pred_denorm, attr_name)
             gt_vis = _to_visual_scalar(gt_values)
             attr_clims[attr_name] = _merge_range(attr_clims[attr_name], gt_vis)
+            if gt_visual_blocks is not None:
+                gt_visual_blocks[attr_name].append(np.asarray(gt_vis, dtype=np.float32).reshape(-1).copy())
             psnr_map[(attr_name, int(step["time_index"]))] = _compute_psnr(gt_values, pred_denorm)
 
-    normalized_clims = {
-        attr_name: _normalize_clim(clim)
-        for attr_name, clim in attr_clims.items()
-    }
-    zoom_factor = _render_zoom_factor(data_info)
+    normalized_clims: dict[str, tuple[float, float]] = {}
+    for attr_name, clim in attr_clims.items():
+        base_clim = _normalize_clim(clim)
+        resolved_clim = _clip_upper_clim(
+            base_clim,
+            gt_visual_blocks[attr_name] if gt_visual_blocks is not None else [],
+            clip_max_percentile,
+        )
+        normalized_clims[attr_name] = resolved_clim
+        if resolved_clim != base_clim:
+            logger.info(
+                "Attr %s color clip: base=[%.6f, %.6f] clipped=[%.6f, %.6f] percentile=%.3f",
+                attr_name,
+                base_clim[0],
+                base_clim[1],
+                resolved_clim[0],
+                resolved_clim[1],
+                float(clip_max_percentile),
+            )
     per_timestep_rows: list[dict[str, object]] = []
 
-    logger.info("Pass 2/2: rendering frames to %s", out_root.resolve())
+    logger.info("Pass 2/2: rendering frames to %s", out_root)
     for step in selected_steps:
         coords_block = _select_tensor_block(dataset.x, step["indexer"])
         pred_map = _predict_block(model, coords_block, attrs, batch_size, device)
         for attr_name in attrs:
-            spec = eval_setup.attr_specs[attr_name]
+            spec = attr_specs[attr_name]
             pred_denorm = _denormalize_for_eval(pred_map[attr_name], spec)
-            gt_values = _as_feature_matrix(_select_array_block(gt_arrays[attr_name], step["indexer"]))
+            gt_values = _select_gt_eval_block(gt_arrays[attr_name], step["indexer"], spec)
+            gt_values, pred_denorm = _align_eval_shapes(gt_values, pred_denorm, attr_name)
             pred_vis = _to_visual_scalar(pred_denorm)
             gt_vis = _to_visual_scalar(gt_values)
             pred_out = _prepare_pred_output_path(
@@ -1372,6 +1791,10 @@ def main():
         args.experiment_path,
         csv_path=(args.csv or None),
         timestamp=args.timestamp,
+        attr=(args.attr or None),
+        zoom=args.zoom,
+        clip_max_percentile=args.clip_max_percentile,
+        output_root=(args.output_root or None),
     )
 
 
