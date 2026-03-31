@@ -1,6 +1,7 @@
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 import numpy as np
@@ -108,6 +109,14 @@ def _resolve_config_paths(cfg, config_path):
     if cfg["MODEL"].get("manager_pt_path"):
         cfg["MODEL"]["manager_pt_path"] = str(_resolve_path(cfg["MODEL"]["manager_pt_path"], config_dir))
     return cfg
+
+
+def _format_duration(seconds):
+    total_seconds = max(0.0, float(seconds))
+    hours = int(total_seconds // 3600)
+    minutes = int((total_seconds % 3600) // 60)
+    secs = total_seconds % 60
+    return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
 def _to_device(data, device):
@@ -249,107 +258,134 @@ def main(args):
     wandb.define_metric("train/*", step_metric="train/step")
 
     log_file = open(os.path.join(args.logdir, "out.log"), "w", encoding="utf-8")
+    timing_cfg = cfg.get("TRAINING", {}).get("timing", {})
+    timing_enabled = bool(timing_cfg.get("enabled", True))
+    timing_start = time.perf_counter()
+    completed_epochs = 0
     print(args)
     print("torch version: ", torch.__version__)
 
-    np.random.seed(cfg["seed"])
-    torch.manual_seed(cfg["seed"])
-    if torch.cuda.is_available():
-        torch.cuda.manual_seed(cfg["seed"])
-    torch.backends.cudnn.deterministic = True
-    torch.backends.cudnn.benchmark = False
+    try:
+        np.random.seed(cfg["seed"])
+        torch.manual_seed(cfg["seed"])
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(cfg["seed"])
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
 
-    train_dataloader, train_set = build_dataloader(cfg, cfg["DATA"]["attr_name"], training=True)
-    cfg["MODEL"]["out_dim"] = 1
+        train_dataloader, train_set = build_dataloader(cfg, cfg["DATA"]["attr_name"], training=True)
+        cfg["MODEL"]["out_dim"] = 1
 
-    device = torch.device("cuda:" + str(args.gpu) if torch.cuda.is_available() else "cpu")
-    cfg["device"] = device
+        device = torch.device("cuda:" + str(args.gpu) if torch.cuda.is_available() else "cpu")
+        cfg["device"] = device
 
-    SINR, _ = build_model(cfg, cfg["LOSS"])
-    n_parameters = utils.count_parameters(SINR)
-    total_parameters, model_size_bytes = _estimate_model_size_fp32(SINR)
-    wandb.log(
-        {
-            "number of paramters": n_parameters,
-            "model_size_bytes_fp32": model_size_bytes,
-            "model_size_mib_fp32": model_size_bytes / (1024 ** 2),
-        }
-    )
-    utils.log_string(f"Number of parameters in the current model:{n_parameters}", log_file)
-    utils.log_string(
-        f"Model size assuming float32 parameters: {_format_size_bytes(model_size_bytes)} "
-        f"(total parameters: {total_parameters})",
-        log_file,
-    )
+        SINR, _ = build_model(cfg, cfg["LOSS"])
+        n_parameters = utils.count_parameters(SINR)
+        total_parameters, model_size_bytes = _estimate_model_size_fp32(SINR)
+        wandb.log(
+            {
+                "number of paramters": n_parameters,
+                "model_size_bytes_fp32": model_size_bytes,
+                "model_size_mib_fp32": model_size_bytes / (1024 ** 2),
+            }
+        )
+        utils.log_string(f"Number of parameters in the current model:{n_parameters}", log_file)
+        utils.log_string(
+            f"Model size assuming float32 parameters: {_format_size_bytes(model_size_bytes)} "
+            f"(total parameters: {total_parameters})",
+            log_file,
+        )
 
-    training_stage_handler = TrainingStageHandler(cfg["TRAINING"]["stages"], SINR, cfg)
-    criterion = training_stage_handler.criterion
-    lr = cfg["TRAINING"]["lr"] if isinstance(cfg["TRAINING"]["lr"], float) else cfg["TRAINING"]["lr"]["all"]
-    optimizer = optim.Adam(training_stage_handler.get_trainable_params(), lr=lr, betas=(0.9, 0.999))
-    if "moe" in cfg["MODEL"]["model_name"]:
-        training_stage_handler.freeze_params()
-    scheduler = training_stage_handler.get_scheduler(optimizer)
+        training_stage_handler = TrainingStageHandler(cfg["TRAINING"]["stages"], SINR, cfg)
+        criterion = training_stage_handler.criterion
+        lr = cfg["TRAINING"]["lr"] if isinstance(cfg["TRAINING"]["lr"], float) else cfg["TRAINING"]["lr"]["all"]
+        optimizer = optim.Adam(training_stage_handler.get_trainable_params(), lr=lr, betas=(0.9, 0.999))
+        if "moe" in cfg["MODEL"]["model_name"]:
+            training_stage_handler.freeze_params()
+        scheduler = training_stage_handler.get_scheduler(optimizer)
 
-    if cfg["MODEL"].get("load_pt_manager", False):
-        manager_pt_checkpoint_path = Path(cfg["MODEL"]["manager_pt_path"])
-        if not manager_pt_checkpoint_path.exists():
-            raise FileNotFoundError(f"Missing manager pretrain checkpoint: {manager_pt_checkpoint_path}")
-        SINR.load_state_dict(_load_state_dict_payload(manager_pt_checkpoint_path, device), strict=True)
-        utils.log_string(f"Loaded pretrained manager from {manager_pt_checkpoint_path}", log_file)
+        if cfg["MODEL"].get("load_pt_manager", False):
+            manager_pt_checkpoint_path = Path(cfg["MODEL"]["manager_pt_path"])
+            if not manager_pt_checkpoint_path.exists():
+                raise FileNotFoundError(f"Missing manager pretrain checkpoint: {manager_pt_checkpoint_path}")
+            SINR.load_state_dict(_load_state_dict_payload(manager_pt_checkpoint_path, device), strict=True)
+            utils.log_string(f"Loaded pretrained manager from {manager_pt_checkpoint_path}", log_file)
 
-    SINR.to(device)
+        SINR.to(device)
 
-    model_outdir = Path(args.logdir) / "trained_models"
-    save_interval = int(cfg["TRAINING"].get("save_every", 100) or 100)
+        model_outdir = Path(args.logdir) / "trained_models"
+        save_interval = int(cfg["TRAINING"].get("save_every", 100) or 100)
+        max_epochs = int(cfg["TRAINING"]["num_epochs"])
 
-    for step, data in enumerate(train_dataloader):
-        if step >= int(cfg["TRAINING"]["num_epochs"]):
-            break
+        for step, data in enumerate(train_dataloader):
+            if step >= max_epochs:
+                break
 
-        if step % save_interval == 0:
-            torch.save(SINR.state_dict(), str(model_outdir / f"{cfg['MODEL']['model_name']}_model_{step}.pth"))
+            epoch_timer_start = time.perf_counter() if timing_enabled else None
 
-        data = _to_device(data, device)
-        SINR.zero_grad()
-        SINR.train()
+            if step % save_interval == 0:
+                torch.save(SINR.state_dict(), str(model_outdir / f"{cfg['MODEL']['model_name']}_model_{step}.pth"))
 
-        output_pred = SINR(data["nonmnfld_points"])
-        output_pred["step"] = step
-        output_pred["logdir"] = args.logdir
-        loss_dict = criterion(output_pred=output_pred, data=data, dataset=train_set)
+            data = _to_device(data, device)
+            SINR.zero_grad()
+            SINR.train()
 
-        lr_t = torch.tensor(optimizer.param_groups[0]["lr"])
-        loss_dict["lr"] = lr_t
-        if "moe" in cfg["MODEL"]["model_name"] and cfg["MODEL"]["manager_q_activation"] == "softmax" and cfg["MODEL"]["manager_softmax_temp_trainable"]:
-            loss_dict["softmax_temp"] = SINR.manager_net.q_activation.temperature.item()
+            output_pred = SINR(data["nonmnfld_points"])
+            output_pred["step"] = step
+            output_pred["logdir"] = args.logdir
+            loss_dict = criterion(output_pred=output_pred, data=data, dataset=train_set)
 
-        utils.log_losses_wandb(step, -1, 1, loss_dict, 1, criterion.weight_dict)
-        if step % 100 == 0:
-            utils.log_string(f"{step:05d} " + lossdict2str(loss_dict), log_file)
+            lr_t = torch.tensor(optimizer.param_groups[0]["lr"])
+            loss_dict["lr"] = lr_t
+            if "moe" in cfg["MODEL"]["model_name"] and cfg["MODEL"]["manager_q_activation"] == "softmax" and cfg["MODEL"]["manager_softmax_temp_trainable"]:
+                loss_dict["softmax_temp"] = SINR.manager_net.q_activation.temperature.item()
 
-        loss_dict["loss"].backward()
-        optimizer.step()
-        scheduler.step()
+            utils.log_losses_wandb(step, -1, 1, loss_dict, 1, criterion.weight_dict)
+            if step % 100 == 0:
+                utils.log_string(f"{step:05d} " + lossdict2str(loss_dict), log_file)
 
-        if step > training_stage_handler.get_end_iteration():
-            utils.log_string("Moved to the next training stage...", log_file)
-            training_stage_handler.move_to_the_next_training_stage(optimizer, scheduler)
-            criterion = training_stage_handler.criterion
+            loss_dict["loss"].backward()
+            optimizer.step()
+            scheduler.step()
 
-    final_state_path = model_outdir / f"{cfg['MODEL']['model_name']}_model_final.pth"
-    torch.save(SINR.state_dict(), str(final_state_path))
-    utils.log_string(f"Saved final state dict to {final_state_path}", log_file)
+            if step > training_stage_handler.get_end_iteration():
+                utils.log_string("Moved to the next training stage...", log_file)
+                training_stage_handler.move_to_the_next_training_stage(optimizer, scheduler)
+                criterion = training_stage_handler.criterion
 
-    if cfg["TRAINING"].get("segmentation_mode", False) and cfg["MODEL"].get("manager_pt_path"):
-        manager_pt_path = Path(cfg["MODEL"]["manager_pt_path"])
-        manager_pt_path.parent.mkdir(parents=True, exist_ok=True)
-        torch.save(SINR.state_dict(), str(manager_pt_path))
-        utils.log_string(f"Exported manager pretrain checkpoint to {manager_pt_path}", log_file)
+            completed_epochs = step + 1
+            if timing_enabled and epoch_timer_start is not None:
+                epoch_elapsed = time.perf_counter() - epoch_timer_start
+                utils.log_string(
+                    f"[timing] epoch {completed_epochs:05d}/{max_epochs:05d}: "
+                    f"{epoch_elapsed:.3f}s ({_format_duration(epoch_elapsed)})",
+                    log_file,
+                )
 
-    validate_cfg_path, validate_ckpt_path = _export_validate_artifacts(cfg, args, train_set, SINR)
-    utils.log_string(f"Exported validate config to {validate_cfg_path}", log_file)
-    utils.log_string(f"Exported validate checkpoint to {validate_ckpt_path}", log_file)
-    log_file.close()
+        final_state_path = model_outdir / f"{cfg['MODEL']['model_name']}_model_final.pth"
+        torch.save(SINR.state_dict(), str(final_state_path))
+        utils.log_string(f"Saved final state dict to {final_state_path}", log_file)
+
+        if cfg["TRAINING"].get("segmentation_mode", False) and cfg["MODEL"].get("manager_pt_path"):
+            manager_pt_path = Path(cfg["MODEL"]["manager_pt_path"])
+            manager_pt_path.parent.mkdir(parents=True, exist_ok=True)
+            torch.save(SINR.state_dict(), str(manager_pt_path))
+            utils.log_string(f"Exported manager pretrain checkpoint to {manager_pt_path}", log_file)
+
+        validate_cfg_path, validate_ckpt_path = _export_validate_artifacts(cfg, args, train_set, SINR)
+        utils.log_string(f"Exported validate config to {validate_cfg_path}", log_file)
+        utils.log_string(f"Exported validate checkpoint to {validate_ckpt_path}", log_file)
+    finally:
+        if timing_enabled:
+            total_elapsed = time.perf_counter() - timing_start
+            avg_epoch_time = total_elapsed / completed_epochs if completed_epochs > 0 else 0.0
+            utils.log_string(
+                f"[timing] training summary: epochs={completed_epochs}, "
+                f"total={total_elapsed:.3f}s ({_format_duration(total_elapsed)}), "
+                f"avg_epoch={avg_epoch_time:.3f}s",
+                log_file,
+            )
+        log_file.close()
 
 
 def parse_args():
