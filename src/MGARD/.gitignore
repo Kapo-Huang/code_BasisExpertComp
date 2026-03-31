@@ -1,0 +1,56 @@
+#Object files.
+obj/
+
+#Archives.
+lib/
+
+#Executables.
+bin/
+
+#MGARD compressed output
+*.mgard
+
+#Eclipse 
+.cproject
+.project
+.language.settings.xml
+.settings/
+.pydevproject
+
+# Vi(m) temporary buffer files
+*.sw?
+
+# Emacs temporary files
+*~
+
+#binary, library, or temporary build files
+*.o
+*.a
+*.so
+*.tmp
+*.exe
+*.bp
+*.out
+*.pyc
+*.bp
+*.bp.dir
+build/
+
+# Mac OSX finder-related files
+.DS_Store
+
+# Doxygen generated files
+html/
+*.html
+docs/api_doxygen/CXX11/xml/
+docs/api_doxygen/C/xml/
+
+# Visual Studio
+.vs/
+CMakeSettings.json
+
+#Sublime
+._*
+
+#'Tags' file.
+tags

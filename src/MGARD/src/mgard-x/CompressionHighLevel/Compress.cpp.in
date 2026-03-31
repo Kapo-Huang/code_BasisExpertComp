@@ -1,0 +1,43 @@
+/*
+ * Copyright 2022, Oak Ridge National Laboratory.
+ * MGARD-X: MultiGrid Adaptive Reduction of Data Portable across GPUs and CPUs
+ * Author: Jieyang Chen (chenj3@ornl.gov)
+ * Date: March 17, 2022
+ */
+
+#include "mgard-x/CompressionHighLevel/CompressionHighLevel.hpp"
+// clang-format off
+namespace mgard_x {
+
+template enum compress_status_type compress<@DEVICE_TYPE@>(DIM D, data_type dtype,
+                                       std::vector<SIZE> shape, double tol,
+                                       double s, enum error_bound_type mode,
+                                       const void *original_data,
+                                       void *&compressed_data,
+                                       size_t &compressed_size, Config config,
+                                       bool output_pre_allocated);
+
+template enum compress_status_type
+compress<@DEVICE_TYPE@>(DIM D, data_type dtype, std::vector<SIZE> shape,
+                         double tol, double s, enum error_bound_type mode,
+                         const void *original_data, void *&compressed_data,
+                         size_t &compressed_size, bool output_pre_allocated);
+
+template enum compress_status_type compress<@DEVICE_TYPE@>(
+    DIM D, data_type dtype, std::vector<SIZE> shape, double tol, double s,
+    enum error_bound_type mode, const void *original_data,
+    void *&compressed_data, size_t &compressed_size,
+    std::vector<const Byte *> coords, Config config, bool output_pre_allocated);
+
+template enum compress_status_type compress<@DEVICE_TYPE@>(
+    DIM D, data_type dtype, std::vector<SIZE> shape, double tol, double s,
+    enum error_bound_type mode, const void *original_data,
+    void *&compressed_data, size_t &compressed_size,
+    std::vector<const Byte *> coords, bool output_pre_allocated);
+
+template void pin_memory<@DEVICE_TYPE@>(void * ptr, SIZE num_bytes);
+template bool check_memory_pinned<@DEVICE_TYPE@>(void * ptr);
+template void unpin_memory<@DEVICE_TYPE@>(void * ptr);
+
+} // namespace mgard_x
+// clang-format on

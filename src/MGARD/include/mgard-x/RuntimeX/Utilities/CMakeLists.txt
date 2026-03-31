@@ -1,0 +1,9 @@
+list(APPEND MGARD_X_HEADER
+    ${CMAKE_CURRENT_SOURCE_DIR}/CheckShape.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Log.h
+    ${CMAKE_CURRENT_SOURCE_DIR}/OffsetCalculator.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Serializer.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/SubArrayPrinter.hpp
+    ${CMAKE_CURRENT_SOURCE_DIR}/Timer.hpp
+    )
+set(MGARD_X_HEADER ${MGARD_X_HEADER} PARENT_SCOPE)

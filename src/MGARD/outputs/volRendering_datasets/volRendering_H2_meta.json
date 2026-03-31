@@ -1,0 +1,20 @@
+{
+  "input": "/mnt/d/Lab/data_compression/MGARD/data/volRendering_datasets/volRendering_H2.npy",
+  "loaded_shape": [
+    36902400
+  ],
+  "used_shape": [
+    600,
+    248,
+    248
+  ],
+  "dtype": "float32",
+  "mgard_dtype_flag": "s",
+  "compressed": "/mnt/d/Lab/data_compression/MGARD/outputs/volRendering_datasets/volRendering_H2.mgard",
+  "compressed_nbytes": 9559438,
+  "error_mode": "abs",
+  "error_bound": 0.01,
+  "smoothness": "0",
+  "device": "openmp",
+  "coordinates": null
+}

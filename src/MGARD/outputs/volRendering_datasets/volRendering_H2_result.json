@@ -1,0 +1,14 @@
+{
+  "mode": "decompress",
+  "compressed": "/mnt/d/Lab/data_compression/MGARD/outputs/volRendering_datasets/volRendering_H2.mgard",
+  "recon": "/mnt/d/Lab/data_compression/MGARD/outputs/volRendering_datasets/volRendering_H2_recon.npy",
+  "shape": [
+    600,
+    248,
+    248
+  ],
+  "dtype": "float32",
+  "compressed_nbytes": 9559438,
+  "recon_nbytes": 147609600,
+  "meta_json": "/mnt/d/Lab/data_compression/MGARD/outputs/volRendering_datasets/volRendering_H2_meta.json"
+}

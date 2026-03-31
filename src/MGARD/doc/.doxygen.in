@@ -1,0 +1,61 @@
+#---------------------------------------------------------------------------
+# Project related configuration options
+#---------------------------------------------------------------------------
+DOXYFILE_ENCODING      = UTF-8
+PROJECT_NAME           = "MGARD"
+PROJECT_NUMBER         = @MGARD_VERSION@
+PROJECT_BRIEF          = "MultiGrid Adaptive Reduction of Data"
+PROJECT_LOGO           =
+OUTPUT_DIRECTORY       = "@CMAKE_CURRENT_BINARY_DIR@/doxygen"
+
+#---------------------------------------------------------------------------
+# Build related configuration options
+#---------------------------------------------------------------------------
+
+INLINE_INHERITED_MEMB  = YES
+MULTILINE_CPP_IS_BRIEF = YES
+BUILTIN_STL_SUPPORT    = YES
+EXTRACT_LOCAL_CLASSES  = NO
+SORT_MEMBER_DOCS       = NO
+SORT_BY_SCOPE_NAME     = YES
+GENERATE_TODOLIST      = NO
+GENERATE_TESTLIST      = NO
+GENERATE_BUGLIST       = NO
+GENERATE_DEPRECATEDLIST= YES
+
+#---------------------------------------------------------------------------
+# Configuration options related to warning and progress messages
+#---------------------------------------------------------------------------
+
+WARN_AS_ERROR          = NO
+
+#---------------------------------------------------------------------------
+# Configuration options related to the input files
+#---------------------------------------------------------------------------
+
+INPUT                  = include @MGARD_DOC_PAGES_JOINED@
+RECURSIVE              = YES
+FILE_PATTERNS          = *.h *.hpp
+EXCLUDE                = include/cuda include/mgard-x include/cli include/adaptive_roi.hpp include/adaptive_roi.tpp
+USE_MDFILE_AS_MAINPAGE = @MGARD_DOC_MAINPAGE@
+
+#---------------------------------------------------------------------------
+# Configuration options related to the HTML output
+#---------------------------------------------------------------------------
+
+HTML_TIMESTAMP         = YES
+
+#---------------------------------------------------------------------------
+# Configuration options related to the LaTeX output
+#---------------------------------------------------------------------------
+
+# If the GENERATE_LATEX tag is set to YES, doxygen will generate LaTeX output.
+# The default value is: YES.
+
+GENERATE_LATEX         = NO
+
+#---------------------------------------------------------------------------
+# Configuration options related to the dot tool
+#---------------------------------------------------------------------------
+
+HAVE_DOT               = NO

@@ -1,0 +1,48 @@
+# 单一配置文件，通过修改 mode 在 compress / decompress 两种模式之间切换
+mode: compress   # 可选: compress / decompress
+
+mgard_x: ./build/bin/mgard-x
+
+# ------------------------------
+# compress 模式使用下面这些字段
+# ------------------------------
+input: ./data/volRendering_datasets/volRendering_H2.npy
+compressed: ./outputs/volRendering_datasets/volRendering_H2.mgard
+meta_json: ./outputs/volRendering_datasets/volRendering_H2_meta.json
+result_json: ./outputs/volRendering_datasets/volRendering_H2_result.json
+
+
+shape: [600, 248, 248]
+
+error_mode: abs
+error_bound: 1e-2
+smoothness: 0
+
+# ------------------------------
+# decompress 模式至少需要这些字段
+# - compressed
+# - recon
+# 并且二选一:
+#   1) meta_json 已存在
+#   2) 手动提供 recon_shape + recon_dtype
+# ------------------------------
+recon: ./outputs/volRendering_datasets/volRendering_H2_recon.npy
+
+# 如果没有 meta_json，就取消下面两行注释
+# recon_shape: [600, 248, 248]
+# recon_dtype: float32
+
+# ------------------------------
+# 通用运行参数
+# ------------------------------
+device: openmp
+verbose: 2
+num_devices: 1
+prefetch: true
+
+# 以下主要用于 compress
+reorder: 0
+domain_decomposition: 0
+max_memory_footprint:
+lossless: 2
+coordinates:
