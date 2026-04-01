@@ -22,6 +22,9 @@ from inr.utils.logging_utils import setup_logging
 logger = logging.getLogger(__name__)
 
 _MESH_SUBDIRS = ("validate_mesh", "mesh_vtu", "wind_vtu")
+_GT_CACHE_VERSION = 2
+_VIRIDIS_YELLOW_BIAS_POWER = 1.18
+_VIRIDIS_LUT_SIZE = 256
 _CSV_FIELDNAMES = [
     "row_type",
     "exp_id",
@@ -1309,7 +1312,7 @@ def _render_frame(
     plotter.add_mesh(
         mesh,
         scalars="U_vis",
-        cmap="viridis",
+        cmap=_yellow_biased_viridis(),
         clim=list(clim),
         show_edges=False,
         show_scalar_bar=False,
@@ -1386,6 +1389,20 @@ def _load_image(path: Path) -> np.ndarray:
         return _ensure_rgb_uint8(np.asarray(img.convert("RGB")))
 
 
+@lru_cache(maxsize=1)
+def _yellow_biased_viridis():
+    try:
+        from matplotlib import cm
+        from matplotlib.colors import ListedColormap
+    except ImportError:
+        return "viridis"
+
+    samples = np.linspace(0.0, 1.0, _VIRIDIS_LUT_SIZE, dtype=np.float64)
+    remapped = 1.0 - np.power(1.0 - samples, _VIRIDIS_YELLOW_BIAS_POWER)
+    base = cm.get_cmap("viridis", _VIRIDIS_LUT_SIZE)
+    return ListedColormap(base(remapped), name="viridis_yellow_biased")
+
+
 def _gt_meta_path(image_path: Path) -> Path:
     return image_path.with_suffix(".json")
 
@@ -1397,6 +1414,10 @@ def _read_gt_cache_clim(image_path: Path) -> tuple[float, float] | None:
     try:
         payload = json.loads(meta_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if int(payload.get("cache_version", -1)) != _GT_CACHE_VERSION:
         return None
     clim = payload.get("clim")
     if not isinstance(clim, list) or len(clim) != 2:
@@ -1410,7 +1431,14 @@ def _read_gt_cache_clim(image_path: Path) -> tuple[float, float] | None:
 def _write_gt_cache_clim(image_path: Path, clim: tuple[float, float]) -> None:
     meta_path = _gt_meta_path(image_path)
     meta_path.write_text(
-        json.dumps({"clim": [float(clim[0]), float(clim[1])]}, ensure_ascii=True, indent=2),
+        json.dumps(
+            {
+                "cache_version": _GT_CACHE_VERSION,
+                "clim": [float(clim[0]), float(clim[1])],
+            },
+            ensure_ascii=True,
+            indent=2,
+        ),
         encoding="utf-8",
     )
 

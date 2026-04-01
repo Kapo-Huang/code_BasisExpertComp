@@ -13,7 +13,6 @@ from inr.utils.logging_utils import setup_logging
 from validate_results import (
     _align_eval_shapes,
     _build_lpips_model,
-    _can_reuse_gt_cache,
     _clip_upper_clim,
     _collect_mesh_candidates,
     _compute_lpips,
@@ -31,7 +30,6 @@ from validate_results import (
     _resolve_mesh_for_timestep,
     _select_default_timestamps,
     _to_visual_scalar,
-    _write_gt_cache_clim,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +64,7 @@ _METHOD_COMPRESSED_EXT = {
 }
 _RECON_SUFFIXES = ("_recon.npy", "recon.npy")
 _RESULT_SUFFIXES = ("_result.json", "result.json")
+_GT_CACHE_VERSION = 3
 
 
 @dataclass(frozen=True)
@@ -528,6 +527,76 @@ def _write_csv_rows(csv_path: Path, rows: list[dict[str, Any]]):
             writer.writerow(row)
 
 
+def _gt_meta_path(image_path: Path) -> Path:
+    return image_path.with_suffix(".json")
+
+
+def _read_gt_cache_meta(image_path: Path) -> dict[str, Any] | None:
+    meta_path = _gt_meta_path(image_path)
+    if not image_path.exists() or not meta_path.exists():
+        return None
+    try:
+        payload = json.loads(meta_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _write_gt_cache_meta(
+    image_path: Path,
+    clim: tuple[float, float],
+    mesh_path: Path,
+    association: str,
+    raw_time: float,
+    num_samples: int,
+) -> None:
+    payload = {
+        "cache_version": _GT_CACHE_VERSION,
+        "clim": [float(clim[0]), float(clim[1])],
+        "mesh_path": str(mesh_path.resolve()),
+        "association": str(association),
+        "raw_time": float(raw_time),
+        "num_samples": int(num_samples),
+    }
+    _gt_meta_path(image_path).write_text(
+        json.dumps(payload, ensure_ascii=True, indent=2),
+        encoding="utf-8",
+    )
+
+
+def _can_reuse_gt_cache(
+    image_path: Path,
+    clim: tuple[float, float],
+    mesh_path: Path,
+    association: str,
+    raw_time: float,
+    num_samples: int,
+) -> bool:
+    payload = _read_gt_cache_meta(image_path)
+    if payload is None:
+        return False
+    if int(payload.get("cache_version", -1)) != _GT_CACHE_VERSION:
+        return False
+    cached_clim = payload.get("clim")
+    if not isinstance(cached_clim, list) or len(cached_clim) != 2:
+        return False
+    if not np.allclose(np.asarray(cached_clim, dtype=np.float64), np.asarray(clim, dtype=np.float64), rtol=1e-6, atol=1e-12):
+        return False
+    if str(payload.get("mesh_path", "")) != str(mesh_path.resolve()):
+        return False
+    if str(payload.get("association", "")) != str(association):
+        return False
+    if int(payload.get("num_samples", -1)) != int(num_samples):
+        return False
+    try:
+        cached_time = float(payload.get("raw_time"))
+    except (TypeError, ValueError):
+        return False
+    return bool(np.isclose(cached_time, float(raw_time), rtol=1e-9, atol=1e-12))
+
+
 def _manifest_status_for_record(record: ArtifactRecord) -> str:
     paths = {
         "compressed": record.compressed_path,
@@ -793,7 +862,14 @@ def _validate_record(
                 clim=normalized_clim,
                 zoom_factor=zoom_factor,
             )
-            if _can_reuse_gt_cache(gt_out, normalized_clim):
+            if _can_reuse_gt_cache(
+                gt_out,
+                normalized_clim,
+                mesh_path=step["mesh_path"],
+                association=step["mesh_association"],
+                raw_time=float(step["raw_time"]),
+                num_samples=int(step["sample_count"]),
+            ):
                 gt_img = _load_image(gt_out)
             else:
                 gt_img = _render_frame(
@@ -804,7 +880,14 @@ def _validate_record(
                     clim=normalized_clim,
                     zoom_factor=zoom_factor,
                 )
-                _write_gt_cache_clim(gt_out, normalized_clim)
+                _write_gt_cache_meta(
+                    gt_out,
+                    normalized_clim,
+                    mesh_path=step["mesh_path"],
+                    association=step["mesh_association"],
+                    raw_time=float(step["raw_time"]),
+                    num_samples=int(step["sample_count"]),
+                )
 
             ssim_value = _compute_ssim(gt_img, pred_img)
             lpips_value = _compute_lpips(lpips_model, gt_img, pred_img, device)
