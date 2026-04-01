@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import shutil
 import sys
+import time
 from pathlib import Path
 
 THIS_DIR = Path(__file__).resolve().parent
@@ -86,6 +87,20 @@ def _format_size_bytes(size_bytes):
     size_mib = size_bytes / (1024 ** 2)
     size_mb = size_bytes / 1.0e6
     return f"{size_bytes} bytes ({size_mib:.2f} MiB, {size_mb:.2f} MB)"
+
+
+def _sync_device_for_timing(device: torch.device) -> None:
+    if device.type == "cuda" and torch.cuda.is_available():
+        torch.cuda.synchronize(device)
+
+
+def _format_elapsed(seconds: float) -> str:
+    seconds = max(float(seconds), 0.0)
+    hours, rem = divmod(seconds, 3600.0)
+    minutes, secs = divmod(rem, 60.0)
+    if hours >= 1.0:
+        return f"{int(hours):02d}:{int(minutes):02d}:{secs:05.2f}"
+    return f"{int(minutes):02d}:{secs:05.2f}"
 
 
 def _save_validate_checkpoint(model, dataset, out_path):
@@ -215,7 +230,11 @@ def main(args):
 
     model_outdir = run_dir / "trained_models"
     save_interval = int(cfg["TRAINING"].get("save_every", 100) or 100)
+    log_interval = int(cfg["TRAINING"].get("log_every", 100) or 100)
     grad_clip_norm = float(cfg["TRAINING"].get("grad_clip_norm", 0.0) or 0.0)
+    train_started_at = time.perf_counter()
+    last_log_at = train_started_at
+    last_logged_step = -1
 
     for step, data in enumerate(train_dataloader):
         if step >= int(cfg["TRAINING"]["num_epochs"]):
@@ -239,19 +258,46 @@ def main(args):
             loss_dict["softmax_temp"] = SINR.manager_net.q_activation.temperature.item()
 
         utils.log_losses_wandb(step, -1, 1, loss_dict, 1, criterion.weight_dict)
-        if step % 100 == 0:
-            utils.log_string(f"{step:05d} " + lossdict2str(loss_dict), log_file)
-
         loss_dict["loss"].backward()
         if grad_clip_norm > 0:
             nn_utils.clip_grad_norm_(SINR.parameters(), max_norm=grad_clip_norm)
         optimizer.step()
         scheduler.step()
 
+        if step % log_interval == 0:
+            _sync_device_for_timing(device)
+            logged_at = time.perf_counter()
+            total_elapsed = logged_at - train_started_at
+            window_elapsed = logged_at - last_log_at
+            steps_since_last_log = step - last_logged_step
+            avg_step_time = window_elapsed / max(steps_since_last_log, 1)
+            utils.log_string(
+                f"{step:05d} "
+                + lossdict2str(loss_dict)
+                + (
+                    f"time_total: {_format_elapsed(total_elapsed)}, "
+                    f"time_window: {window_elapsed:.2f}s, "
+                    f"time_per_step: {avg_step_time:.4f}s"
+                ),
+                log_file,
+            )
+            last_log_at = logged_at
+            last_logged_step = step
+
         if step > training_stage_handler.get_end_iteration():
             utils.log_string("Moved to the next training stage...", log_file)
             training_stage_handler.move_to_the_next_training_stage(optimizer, scheduler)
             criterion = training_stage_handler.criterion
+
+    _sync_device_for_timing(device)
+    training_elapsed = time.perf_counter() - train_started_at
+    total_steps = min(int(cfg["TRAINING"]["num_epochs"]), step + 1 if "step" in locals() else 0)
+    avg_step_time = training_elapsed / max(total_steps, 1)
+    utils.log_string(
+        f"Training loop finished: steps={total_steps}, total_time={_format_elapsed(training_elapsed)}, "
+        f"avg_step_time={avg_step_time:.4f}s",
+        log_file,
+    )
 
     final_state_path = model_outdir / f"{cfg['MODEL']['model_name']}_model_final.pth"
     torch.save(SINR.state_dict(), str(final_state_path))
