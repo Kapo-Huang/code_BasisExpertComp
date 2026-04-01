@@ -119,6 +119,17 @@ def _format_duration(seconds):
     return f"{hours:02d}:{minutes:02d}:{secs:06.3f}"
 
 
+def _log_timing_window(log_file, start_epoch, end_epoch, max_epochs, elapsed_seconds):
+    window_epochs = max(1, int(end_epoch) - int(start_epoch) + 1)
+    avg_epoch_time = float(elapsed_seconds) / window_epochs
+    utils.log_string(
+        f"[timing] epochs {start_epoch:05d}-{end_epoch:05d}/{max_epochs:05d}: "
+        f"total={elapsed_seconds:.3f}s ({_format_duration(elapsed_seconds)}), "
+        f"avg_epoch={avg_epoch_time:.3f}s",
+        log_file,
+    )
+
+
 def _to_device(data, device):
     out = {}
     for key, value in data.items():
@@ -260,8 +271,12 @@ def main(args):
     log_file = open(os.path.join(args.logdir, "out.log"), "w", encoding="utf-8")
     timing_cfg = cfg.get("TRAINING", {}).get("timing", {})
     timing_enabled = bool(timing_cfg.get("enabled", True))
+    timing_log_interval = max(1, int(timing_cfg.get("log_every", timing_cfg.get("interval", 100)) or 100))
     timing_start = time.perf_counter()
     completed_epochs = 0
+    timing_window_elapsed = 0.0
+    timing_window_start_epoch = 1
+    max_epochs = int(cfg["TRAINING"]["num_epochs"])
     print(args)
     print("torch version: ", torch.__version__)
 
@@ -315,13 +330,12 @@ def main(args):
 
         model_outdir = Path(args.logdir) / "trained_models"
         save_interval = int(cfg["TRAINING"].get("save_every", 100) or 100)
-        max_epochs = int(cfg["TRAINING"]["num_epochs"])
 
         for step, data in enumerate(train_dataloader):
             if step >= max_epochs:
                 break
 
-            epoch_timer_start = time.perf_counter() if timing_enabled else None
+            step_timer_start = time.perf_counter() if timing_enabled else None
 
             if step % save_interval == 0:
                 torch.save(SINR.state_dict(), str(model_outdir / f"{cfg['MODEL']['model_name']}_model_{step}.pth"))
@@ -354,13 +368,18 @@ def main(args):
                 criterion = training_stage_handler.criterion
 
             completed_epochs = step + 1
-            if timing_enabled and epoch_timer_start is not None:
-                epoch_elapsed = time.perf_counter() - epoch_timer_start
-                utils.log_string(
-                    f"[timing] epoch {completed_epochs:05d}/{max_epochs:05d}: "
-                    f"{epoch_elapsed:.3f}s ({_format_duration(epoch_elapsed)})",
-                    log_file,
-                )
+            if timing_enabled and step_timer_start is not None:
+                timing_window_elapsed += time.perf_counter() - step_timer_start
+                if completed_epochs % timing_log_interval == 0:
+                    _log_timing_window(
+                        log_file,
+                        timing_window_start_epoch,
+                        completed_epochs,
+                        max_epochs,
+                        timing_window_elapsed,
+                    )
+                    timing_window_elapsed = 0.0
+                    timing_window_start_epoch = completed_epochs + 1
 
         final_state_path = model_outdir / f"{cfg['MODEL']['model_name']}_model_final.pth"
         torch.save(SINR.state_dict(), str(final_state_path))
@@ -377,6 +396,14 @@ def main(args):
         utils.log_string(f"Exported validate checkpoint to {validate_ckpt_path}", log_file)
     finally:
         if timing_enabled:
+            if completed_epochs >= timing_window_start_epoch and timing_window_elapsed > 0.0:
+                _log_timing_window(
+                    log_file,
+                    timing_window_start_epoch,
+                    completed_epochs,
+                    max_epochs,
+                    timing_window_elapsed,
+                )
             total_elapsed = time.perf_counter() - timing_start
             avg_epoch_time = total_elapsed / completed_epochs if completed_epochs > 0 else 0.0
             utils.log_string(
