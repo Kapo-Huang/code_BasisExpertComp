@@ -1,26 +1,21 @@
-# SZ3 PSNR Wrapper
+# SZ3 Wrapper
 
-This wrapper keeps the native `sz3` binary unchanged and exposes a PSNR-only YAML interface.
+## 用途
 
-## Build
+`sz3_cli.py` 为原生 `sz3` 二进制提供一个基于 YAML 的 PSNR 驱动包装层。
+
+## 构建
 
 ```bash
-cd SZ3
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
-Expected binary path:
+可执行文件通常位于 `build/tools/sz3/sz3`。
 
-```text
-build/tools/sz3/sz3
-```
+## 配置
 
-## Config
-
-Required keys:
+示例：`configs/volRendering_H2.yaml`
 
 ```yaml
 input: ../path/to/volRendering_H2.npy
@@ -33,51 +28,20 @@ recon: outputs/volRendering_H2_recon.npy
 result_json: outputs/volRendering_H2_result.json
 ```
 
-Notes:
+说明：
 
-- `psnr` always means `20 * log10((max(original) - min(original)) / rmse)`.
-- The wrapper calls SZ3 in native PSNR mode: `-M PSNR <psnr>`.
-- `.sz3pkg` stores the native `.sz` payload plus wrapper metadata.
-- Legacy `cr` is no longer accepted.
-- Progress logs are printed to `stderr`; the final JSON result stays on `stdout`.
+- 仅接受 `psnr`
+- `shape` 用于把输入 `.npy` 重排为原生压缩器所需形状
+- 输出目录会自动创建
 
-## Run
+## 运行
 
 ```bash
 python sz3_cli.py --config configs/volRendering_H2.yaml
 ```
 
-## Result Schema
+## 输出
 
-`result_json` and stdout use the same fields:
-
-```json
-{
-  "method": "sz3",
-  "input": "/abs/path/input.npy",
-  "compressed": "/abs/path/output.sz3pkg",
-  "recon": "/abs/path/recon.npy",
-  "loaded_shape": [36902400],
-  "used_shape": [600, 248, 248],
-  "dtype": "float32",
-  "target_mode": "psnr",
-  "target_value": 40.0,
-  "target_psnr": 40.0,
-  "native_mode": "psnr",
-  "native_value": 40.0,
-  "measured_psnr": 39.98,
-  "mse": 0.00012,
-  "rmse": 0.01095,
-  "max_error": 0.083,
-  "original_nbytes": 147609600,
-  "compressed_nbytes": 15353,
-  "compression_ratio": 9614.38155409366,
-  "compression_time_seconds": 1.24,
-  "decompression_time_seconds": 0.31,
-  "total_time_seconds": 1.55,
-  "compress_stdout": "",
-  "compress_stderr": "",
-  "decompress_stdout": "",
-  "decompress_stderr": ""
-}
-```
+- `compressed`：包装后的 `.sz3pkg`
+- `recon`：解压后的 `.npy`
+- `result_json`：统一结构的统计结果

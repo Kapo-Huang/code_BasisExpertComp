@@ -1,6 +1,8 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <exception>
+#include <memory>
 
 #include "SZ3/api/sz.hpp"
 
@@ -158,19 +160,46 @@ void decompress(char *inPath, char *cmpPath, char *decPath, SZ3::Config &conf, i
     size_t cmpSize;
     auto cmpData = SZ3::readfile<char>(cmpPath, cmpSize);
 
-    SZ3::Timer timer(true);
-    auto decData = SZ_decompress<T>(conf, cmpData.get(), cmpSize);
-    double compress_time = timer.stop();
-
     char outputFilePath[1024];
     if (decPath == nullptr) {
         snprintf(outputFilePath, 1024, "%s.out", cmpPath);
     } else {
         strcpy(outputFilePath, decPath);
     }
+
+    T *decData = nullptr;
+    bool heapAllocated = false;
+    double decompress_time = 0;
+    std::unique_ptr<SZ3::MappedOutputFile<T>> mappedOutput;
+
     if (binaryOutput == 1) {
-        SZ3::writefile<T>(outputFilePath, decData, conf.num);
+        try {
+            mappedOutput = std::make_unique<SZ3::MappedOutputFile<T>>(outputFilePath, conf.num);
+            decData = mappedOutput->data();
+
+            SZ3::Timer timer(true);
+            SZ_decompress<T>(conf, cmpData.get(), cmpSize, decData);
+            decompress_time = timer.stop();
+
+            mappedOutput->flush();
+        } catch (const std::exception &e) {
+            fprintf(stderr, "warning: mapped output unavailable, falling back to heap buffer (%s)\n", e.what());
+            heapAllocated = true;
+            decData = new T[conf.num];
+
+            SZ3::Timer timer(true);
+            SZ_decompress<T>(conf, cmpData.get(), cmpSize, decData);
+            decompress_time = timer.stop();
+
+            SZ3::writefile<T>(outputFilePath, decData, conf.num);
+        }
     } else {
+        heapAllocated = true;
+
+        SZ3::Timer timer(true);
+        decData = SZ_decompress<T>(conf, cmpData.get(), cmpSize);
+        decompress_time = timer.stop();
+
         SZ3::writeTextFile<T>(outputFilePath, decData, conf.num);
     }
     if (printCmpResults) {
@@ -180,10 +209,12 @@ void decompress(char *inPath, char *cmpPath, char *decPath, SZ3::Config &conf, i
         assert(totalNbEle == conf.num);
         SZ3::verify<T>(ori_data.get(), decData, conf.num);
     }
-    delete[] decData;
+    if (heapAllocated) {
+        delete[] decData;
+    }
 
     printf("compression ratio = %f\n", conf.num * sizeof(T) * 1.0 / cmpSize);
-    printf("decompression time = %f seconds.\n", compress_time);
+    printf("decompression time = %f seconds.\n", decompress_time);
     printf("decompressed file = %s\n", outputFilePath);
 }
 

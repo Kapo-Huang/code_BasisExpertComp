@@ -1,26 +1,21 @@
-# TTHRESH PSNR Wrapper
+# TTHRESH Wrapper
 
-This wrapper keeps the native `tthresh` binary unchanged and exposes the same PSNR-only interface as the SZ3 and ZFP wrappers.
+## 用途
 
-## Build
+`tthresh_cli.py` 为原生 `tthresh` 二进制提供一个基于 YAML 的 PSNR 包装层。
+
+## 构建
 
 ```bash
-cd tthresh
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
-Expected binary path:
+可执行文件通常位于 `build/tthresh`。
 
-```text
-build/tthresh
-```
+## 配置
 
-## Config
-
-Required keys:
+示例：`configs/volRendering_H2.yaml`
 
 ```yaml
 input: ../path/to/volRendering_H2.npy
@@ -33,50 +28,20 @@ recon: outputs/volRendering_H2_recon.npy
 result_json: outputs/volRendering_H2_result.json
 ```
 
-Notes:
+说明：
 
-- External PSNR is always `20 * log10((max(original) - min(original)) / rmse)`.
-- TTHRESH uses a native PSNR definition with an extra `/ 2` term in the denominator, so the wrapper converts:
-  `native_psnr = target_psnr - 20 * log10(2)`.
-- TTHRESH requires at least 3 dimensions after reshape.
-- Supported dtypes are `uint8`, `uint16`, `int32`, `float32`, and `float64`.
-- Progress logs are printed to `stderr`; the final JSON result stays on `stdout`.
+- 仅接受 `psnr`
+- 包装层会把外部 PSNR 换算为 `tthresh` 原生定义
+- 输入在 reshape 后至少要有 3 个维度
 
-## Run
+## 运行
 
 ```bash
 python tthresh_cli.py --config configs/volRendering_H2.yaml
 ```
 
-## Result Schema
+## 输出
 
-```json
-{
-  "method": "tthresh",
-  "input": "/abs/path/input.npy",
-  "compressed": "/abs/path/output.tthresh",
-  "recon": "/abs/path/recon.npy",
-  "loaded_shape": [36902400],
-  "used_shape": [600, 248, 248],
-  "dtype": "float32",
-  "target_mode": "psnr",
-  "target_value": 40.0,
-  "target_psnr": 40.0,
-  "native_mode": "psnr",
-  "native_value": 33.979400086720375,
-  "measured_psnr": 39.90,
-  "mse": 0.00010,
-  "rmse": 0.01011,
-  "max_error": 0.082,
-  "original_nbytes": 147609600,
-  "compressed_nbytes": 54826,
-  "compression_ratio": 2692.32845730128,
-  "compression_time_seconds": 0.82,
-  "decompression_time_seconds": 0.0,
-  "total_time_seconds": 0.82,
-  "compress_stdout": "oldbits = ...",
-  "compress_stderr": "",
-  "decompress_stdout": "",
-  "decompress_stderr": ""
-}
-```
+- `compressed`：原生 `.tthresh`
+- `recon`：解压后的 `.npy`
+- `result_json`：统一结构的统计结果

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import math
+import os
 import subprocess
 import sys
 import time
@@ -188,6 +189,41 @@ def load_array(
     return np.ascontiguousarray(array), loaded_shape, used_shape
 
 
+def prepare_command_env(command: Sequence[str | Path]) -> dict[str, str]:
+    env = os.environ.copy()
+    existing_entries = [entry for entry in env.get("PATH", "").split(os.pathsep) if entry]
+    candidate_entries: list[str] = []
+
+    command_path = Path(str(command[0])).expanduser()
+    if command_path.is_file():
+        candidate_entries.append(str(command_path.resolve().parent))
+
+    for prefix_value in (os.environ.get("CONDA_PREFIX"), sys.prefix):
+        if not prefix_value:
+            continue
+        prefix_path = Path(prefix_value)
+        for suffix in (("Library", "bin"), ("Library", "mingw-w64", "bin")):
+            candidate_path = prefix_path.joinpath(*suffix)
+            if candidate_path.is_dir():
+                candidate_entries.append(str(candidate_path.resolve()))
+
+    for candidate_path in (Path(r"C:\mingw64\bin"), Path(r"C:\mingw64\opt\bin")):
+        if candidate_path.is_dir():
+            candidate_entries.append(str(candidate_path.resolve()))
+
+    merged_entries: list[str] = []
+    seen_entries: set[str] = set()
+    for entry in [*candidate_entries, *existing_entries]:
+        normalized = os.path.normcase(os.path.normpath(entry))
+        if normalized in seen_entries:
+            continue
+        seen_entries.add(normalized)
+        merged_entries.append(entry)
+
+    env["PATH"] = os.pathsep.join(merged_entries)
+    return env
+
+
 def run_command(command: Sequence[str | Path]) -> CommandResult:
     normalized_command = tuple(str(item) for item in command)
     start_time = time.perf_counter()
@@ -196,6 +232,7 @@ def run_command(command: Sequence[str | Path]) -> CommandResult:
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
+        env=prepare_command_env(normalized_command),
     )
     elapsed_seconds = time.perf_counter() - start_time
     result = CommandResult(
@@ -370,6 +407,20 @@ def build_tthresh_command(
         *map(str, shape),
         "-p",
         format_number(native_psnr),
+        "-c",
+        str(compressed_path),
+        "-o",
+        str(raw_output_path),
+    ]
+
+
+def build_tthresh_decompress_command(
+    binary_path: Path,
+    compressed_path: Path,
+    raw_output_path: Path,
+) -> list[str]:
+    return [
+        str(binary_path),
         "-c",
         str(compressed_path),
         "-o",

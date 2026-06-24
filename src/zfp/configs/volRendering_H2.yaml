@@ -1,6 +1,8 @@
 input: ../path/to/volRendering_H2.npy
 zfp: build/bin/zfp
 psnr: 40.0
+# tolerance: 0.01  # Use exactly one of psnr, tolerance, or rate.
+# rate: 8.0        # Bits per value.
 shape: [600, 248, 248]
 
 compressed: outputs/volRendering_H2.zfp

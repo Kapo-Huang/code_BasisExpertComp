@@ -1,31 +1,29 @@
-# ZFP Accuracy Wrapper
+# ZFP Wrapper
 
-This wrapper keeps the native `zfp` binary unchanged and exposes a YAML interface that accepts `psnr`, absolute-error `tolerance`, or `rate`.
+## 用途
 
-## Build
+`zfp_cli.py` 为原生 `zfp` 二进制提供统一的 YAML 接口，支持三种目标模式：
+
+- `psnr`
+- `tolerance`
+- `rate`
+
+## 构建
 
 ```bash
-cd zfp
-mkdir build
-cd build
-cmake ..
-cmake --build . --config Release
+cmake -S . -B build
+cmake --build build --config Release
 ```
 
-Expected binary path:
+可执行文件通常位于 `build/bin/zfp`。
 
-```text
-build/bin/zfp
-```
+## 配置
 
-## Config
-
-Required keys:
+示例：`configs/volRendering_H2.yaml`
 
 ```yaml
 input: ../path/to/volRendering_H2.npy
 zfp: build/bin/zfp
-
 psnr: 40.0
 # tolerance: 0.01
 # rate: 8.0
@@ -36,82 +34,20 @@ recon: outputs/volRendering_H2_recon.npy
 result_json: outputs/volRendering_H2_result.json
 ```
 
-Notes:
+说明：
 
-- External PSNR is always `20 * log10((max(original) - min(original)) / rmse)`.
-- `psnr`, `tolerance`, and `rate` are mutually exclusive; provide exactly one.
-- ZFP has no native PSNR mode, so when `psnr` is provided the wrapper converts it into native fixed-accuracy mode:
-  `tolerance = data_range * 10^(-psnr / 20)`.
-- When `tolerance` is provided, the wrapper passes it directly to native `-a`.
-- When `rate` is provided, the wrapper passes it directly to native `-r` as bits per value.
-- Compression and decompression both use `-h`, so the `.zfp` file keeps the native header.
-- Only `float32` and `float64` inputs are supported in this wrapper.
-- `cr` is not accepted as a `rate` alias.
-- Progress logs are printed to `stderr`; the final JSON result stays on `stdout`.
+- `psnr`、`tolerance`、`rate` 必须且只能提供一个
+- 当使用 `psnr` 时，包装层会换算成原生 `accuracy` 模式
+- 当前包装器仅支持 `float32` 与 `float64`
 
-Tolerance-only example:
-
-```yaml
-input: ../path/to/volRendering_H2.npy
-zfp: build/bin/zfp
-tolerance: 0.01
-shape: [600, 248, 248]
-
-compressed: outputs/volRendering_H2.zfp
-recon: outputs/volRendering_H2_recon.npy
-result_json: outputs/volRendering_H2_result.json
-```
-
-Rate-only example:
-
-```yaml
-input: ../path/to/volRendering_H2.npy
-zfp: build/bin/zfp
-rate: 8.0
-shape: [600, 248, 248]
-
-compressed: outputs/volRendering_H2.zfp
-recon: outputs/volRendering_H2_recon.npy
-result_json: outputs/volRendering_H2_result.json
-```
-
-## Run
+## 运行
 
 ```bash
 python zfp_cli.py --config configs/volRendering_H2.yaml
 ```
 
-## Result Schema
+## 输出
 
-```json
-{
-  "method": "zfp",
-  "input": "/abs/path/input.npy",
-  "compressed": "/abs/path/output.zfp",
-  "recon": "/abs/path/recon.npy",
-  "loaded_shape": [36902400],
-  "used_shape": [600, 248, 248],
-  "dtype": "float32",
-  "target_mode": "psnr",
-  "target_value": 40.0,
-  "target_psnr": 40.0,
-  "native_mode": "accuracy",
-  "native_value": 0.01,
-  "measured_psnr": 39.12,
-  "mse": 0.00015,
-  "rmse": 0.01225,
-  "max_error": 0.11,
-  "original_nbytes": 147609600,
-  "compressed_nbytes": 18451216,
-  "compression_ratio": 7.99999306278784,
-  "compression_time_seconds": 0.45,
-  "decompression_time_seconds": 0.18,
-  "total_time_seconds": 0.63,
-  "compress_stdout": "",
-  "compress_stderr": "",
-  "decompress_stdout": "",
-  "decompress_stderr": ""
-}
-```
-
-For `rate` input, the same schema is used with `target_mode: "rate"`, `target_psnr: null`, `native_mode: "rate"`, and `native_value` equal to the configured bits per value.
+- `compressed`：原生 `.zfp`
+- `recon`：解压后的 `.npy`
+- `result_json`：统一结构的统计结果

@@ -21,6 +21,14 @@ env/
 # Logs
 *.log
 
+# Compression artifacts
+*.sz3pkg
+*.zfp
+*.tthresh
+src/*/outputs/
+src/Output/
+src/.tmp_*/
+
 # Data / artifacts
 data/
 datasets/

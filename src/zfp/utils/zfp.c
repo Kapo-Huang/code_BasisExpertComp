@@ -4,6 +4,19 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stdint.h>
+#ifdef _WIN32
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#define WIN32_LEAN_AND_MEAN
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/mman.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 #include "zfp.h"
 #include "zfp/internal/zfp/macros.h"
 
@@ -25,6 +38,165 @@ The 7 major tasks to be accomplished are:
 - write uncompressed: o
 - compute stats:      s
 */
+
+#define OUTPUT_IO_CHUNK_BYTES ((size_t)1 << 28)
+
+typedef struct mapped_output_file {
+  void* data;
+  size_t size;
+  zfp_bool active;
+#ifdef _WIN32
+  HANDLE file_handle;
+  HANDLE mapping_handle;
+#else
+  int fd;
+#endif
+} mapped_output_file;
+
+static void
+mapped_output_file_init(mapped_output_file* out)
+{
+  out->data = NULL;
+  out->size = 0;
+  out->active = zfp_false;
+#ifdef _WIN32
+  out->file_handle = INVALID_HANDLE_VALUE;
+  out->mapping_handle = NULL;
+#else
+  out->fd = -1;
+#endif
+}
+
+static void
+mapped_output_file_flush(mapped_output_file* out)
+{
+  if (!out || !out->active || !out->data)
+    return;
+#ifdef _WIN32
+  FlushViewOfFile(out->data, out->size);
+  if (out->file_handle != INVALID_HANDLE_VALUE)
+    FlushFileBuffers(out->file_handle);
+#else
+  msync(out->data, out->size, MS_SYNC);
+#endif
+}
+
+static void
+mapped_output_file_close(mapped_output_file* out)
+{
+  if (!out)
+    return;
+#ifdef _WIN32
+  if (out->data) {
+    FlushViewOfFile(out->data, out->size);
+    UnmapViewOfFile(out->data);
+    out->data = NULL;
+  }
+  if (out->mapping_handle) {
+    CloseHandle(out->mapping_handle);
+    out->mapping_handle = NULL;
+  }
+  if (out->file_handle != INVALID_HANDLE_VALUE) {
+    CloseHandle(out->file_handle);
+    out->file_handle = INVALID_HANDLE_VALUE;
+  }
+#else
+  if (out->data) {
+    msync(out->data, out->size, MS_SYNC);
+    munmap(out->data, out->size);
+    out->data = NULL;
+  }
+  if (out->fd >= 0) {
+    close(out->fd);
+    out->fd = -1;
+  }
+#endif
+  out->size = 0;
+  out->active = zfp_false;
+}
+
+static zfp_bool
+mapped_output_file_open(mapped_output_file* out, const char* path, size_t size)
+{
+  mapped_output_file_init(out);
+  if (!path || !strcmp(path, "-") || !size)
+    return zfp_false;
+
+#ifdef _WIN32
+  {
+    LARGE_INTEGER file_size;
+    DWORD size_high;
+    DWORD size_low;
+
+    out->file_handle = CreateFileA(
+      path,
+      GENERIC_READ | GENERIC_WRITE,
+      0,
+      NULL,
+      CREATE_ALWAYS,
+      FILE_ATTRIBUTE_NORMAL,
+      NULL);
+    if (out->file_handle == INVALID_HANDLE_VALUE) {
+      mapped_output_file_close(out);
+      return zfp_false;
+    }
+
+    file_size.QuadPart = (LONGLONG)size;
+    if (!SetFilePointerEx(out->file_handle, file_size, NULL, FILE_BEGIN) || !SetEndOfFile(out->file_handle)) {
+      mapped_output_file_close(out);
+      return zfp_false;
+    }
+
+    size_high = (DWORD)(((uint64_t)size >> 32u) & 0xffffffffu);
+    size_low = (DWORD)((uint64_t)size & 0xffffffffu);
+    out->mapping_handle = CreateFileMappingA(out->file_handle, NULL, PAGE_READWRITE, size_high, size_low, NULL);
+    if (!out->mapping_handle) {
+      mapped_output_file_close(out);
+      return zfp_false;
+    }
+
+    out->data = MapViewOfFile(out->mapping_handle, FILE_MAP_ALL_ACCESS, 0, 0, size);
+    if (!out->data) {
+      mapped_output_file_close(out);
+      return zfp_false;
+    }
+  }
+#else
+  out->fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+  if (out->fd < 0) {
+    mapped_output_file_close(out);
+    return zfp_false;
+  }
+  if (ftruncate(out->fd, (off_t)size) != 0) {
+    mapped_output_file_close(out);
+    return zfp_false;
+  }
+  out->data = mmap(NULL, size, PROT_READ | PROT_WRITE, MAP_SHARED, out->fd, 0);
+  if (out->data == MAP_FAILED) {
+    out->data = NULL;
+    mapped_output_file_close(out);
+    return zfp_false;
+  }
+#endif
+
+  out->size = size;
+  out->active = zfp_true;
+  return zfp_true;
+}
+
+static zfp_bool
+write_buffer_chunks(FILE* file, const void* data, size_t size)
+{
+  const uchar* ptr = (const uchar*)data;
+  while (size) {
+    size_t chunk = MIN(size, OUTPUT_IO_CHUNK_BYTES);
+    if (fwrite(ptr, 1, chunk, file) != chunk)
+      return zfp_false;
+    ptr += chunk;
+    size -= chunk;
+  }
+  return zfp_true;
+}
 
 /* compute and print reconstruction error */
 static void
@@ -171,6 +343,9 @@ int main(int argc, char* argv[])
   size_t rawsize = 0;
   size_t zfpsize = 0;
   size_t bufsize = 0;
+  mapped_output_file mapped_output;
+
+  mapped_output_file_init(&mapped_output);
 
   if (argc == 1)
     usage();
@@ -570,10 +745,15 @@ int main(int argc, char* argv[])
 
     /* allocate memory for decompressed data */
     rawsize = typesize * count;
-    fo = malloc(rawsize);
-    if (!fo) {
-      fprintf(stderr, "cannot allocate memory\n");
-      return EXIT_FAILURE;
+    if (outpath && strcmp(outpath, "-") && mapped_output_file_open(&mapped_output, outpath, rawsize)) {
+      fo = mapped_output.data;
+    }
+    else {
+      fo = malloc(rawsize);
+      if (!fo) {
+        fprintf(stderr, "cannot allocate memory\n");
+        return EXIT_FAILURE;
+      }
     }
     zfp_field_set_pointer(field, fo);
 
@@ -594,16 +774,21 @@ int main(int argc, char* argv[])
 
     /* optionally write reconstructed data */
     if (outpath) {
-      FILE* file = !strcmp(outpath, "-") ? stdout : fopen(outpath, "wb");
-      if (!file) {
-        fprintf(stderr, "cannot create output file\n");
-        return EXIT_FAILURE;
+      if (mapped_output.active) {
+        mapped_output_file_flush(&mapped_output);
       }
-      if (fwrite(fo, typesize, count, file) != count) {
-        fprintf(stderr, "cannot write output file\n");
-        return EXIT_FAILURE;
+      else {
+        FILE* file = !strcmp(outpath, "-") ? stdout : fopen(outpath, "wb");
+        if (!file) {
+          fprintf(stderr, "cannot create output file\n");
+          return EXIT_FAILURE;
+        }
+        if (!write_buffer_chunks(file, fo, rawsize)) {
+          fprintf(stderr, "cannot write output file\n");
+          return EXIT_FAILURE;
+        }
+        fclose(file);
       }
-      fclose(file);
     }
   }
 
@@ -623,6 +808,10 @@ int main(int argc, char* argv[])
   stream_close(stream);
   free(buffer);
   free(fi);
+  if (mapped_output.active) {
+    mapped_output_file_close(&mapped_output);
+    fo = NULL;
+  }
   free(fo);
 
   return EXIT_SUCCESS;
